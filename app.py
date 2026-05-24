@@ -180,8 +180,8 @@ with tabs[0]:
                 ('[Status] Peso/Altura (≥7)', '(D) Medição Peso/Altura (Peso: 9 pts)', 9),
                 ('[Status] VD ACS Gestação (≥3)', '(E) Visitas ACS Gestação (Peso: 9 pts)', 9),
                 ('[Status] Vacina dTpa', '(F) Vacinação dTpa (Peso: 9 pts)', 9),
-                ('[Status] Testes 1ºTri', '(G) Testes 1º Tri (Sífilis, HIV, Hep B/C) (Peso: 9 pts)', 9),
-                ('[Status] Testes 3ºTri', '(H) Testes 3º Tri (Sífilis, HIV) (Peso: 9 pts)', 9),
+                ('[Status] Testes 1ºTri', '(G) Testes 1º Tri (Peso: 9 pts)', 9),
+                ('[Status] Testes 3ºTri', '(H) Testes 3º Tri (Peso: 9 pts)', 9),
                 ('[Status] Cons. Puerpério', '(I) Consulta Puerpério (Peso: 9 pts)', 9),
                 ('[Status] VD Puerpério', '(J) Visita ACS Puerpério (Peso: 9 pts)', 9),
                 ('[Status] Odonto Gestação', '(K) Atendimento Odontológico (Peso: 9 pts)', 9)
@@ -190,34 +190,48 @@ with tabs[0]:
         'inf': {
             'titulo': "👶 C2: Desenvolvimento Infantil",
             'metricas': [
-                ('[Status] Consultas (≥9)', 'Consultas de Rotina (Peso: 50 pts)', 50),
-                ('[Status] Vacinas Básicas', 'Esquema Vacinal (Peso: 50 pts)', 50)
+                ('[Status] 1ª Cons. (≤30 dias)', '(A) 1ª Consulta até 30 dias (Peso: 20 pts)', 20),
+                ('[Status] Consultas (≥9)', '(B) Consultas de Rotina (Peso: 20 pts)', 20),
+                ('[Status] Peso/Altura (≥9)', '(C) Peso e Altura (Peso: 20 pts)', 20),
+                ('[Status] Visita ACS (≥2)', '(D) Visitas Domiciliares (Peso: 20 pts)', 20),
+                ('[Status] Vacinas Básicas', '(E) Esquema Vacinal (Peso: 20 pts)', 20)
             ]
         },
         'mul': {
             'titulo': "👩 C7: Saúde da Mulher",
             'metricas': [
-                ('[Status] Preventivo (25-64a)', 'Citopatológico (Peso: 50 pts)', 50),
-                ('[Status] Mamografia (50-69a)', 'Mamografia (Peso: 50 pts)', 50)
+                ('[Status] Preventivo (25-64a)', '(A) Citopatológico (Peso: 30 pts)', 30),
+                ('[Status] Saúde Reprod. (14-69a)', '(B) Saúde Sexual/Reprodutiva (Peso: 30 pts)', 30),
+                ('[Status] Mamografia (50-69a)', '(C) Mamografia (Peso: 20 pts)', 20),
+                ('[Status] Vacina HPV (9-14a)', '(D) Vacina HPV (Peso: 20 pts)', 20)
             ]
         },
         'diab': {
             'titulo': "🩸 C4: Diabetes Mellitus",
             'metricas': [
-                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada (Peso: 50 pts)', 50),
-                ('[Status] Pé Diabético (15m)', 'Rastreio do Pé Diabético (Peso: 50 pts)', 50)
+                # As métricas de consulta e PA devem ser mapeadas na Tab 4 se ainda não existirem lá.
+                # Aqui utilizamos pesos aproximados para fechar os 100 pontos das 6 boas práticas.
+                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada (Peso: 20 pts)', 20),
+                ('[Status] Pé Diabético (15m)', 'Rastreio do Pé Diabético (Peso: 20 pts)', 20), # Lembre-se de mudar a variável na aba para 12m
+                ('[Status] Peso/Altura (12m)', 'Peso e Altura (Peso: 20 pts)', 20),
+                ('[Status] Visitas ACS (≥2)', 'Visitas do Agente Comunitário (Peso: 40 pts)', 40)
             ]
         },
         'hiper': {
             'titulo': "🫀 C5: Hipertensão Arterial",
             'metricas': [
-                ('[Status] Consulta e PA (6m)', 'Consulta e PA Semestral (Peso: 100 pts)', 100)
+                ('[Status] Consulta e PA (6m)', 'Consulta e PA Semestral (Peso: 50 pts)', 50),
+                ('[Status] Peso/Altura (12m)', 'Peso e Altura Anual (Peso: 25 pts)', 25),
+                ('[Status] Visitas ACS', 'Visitas do Agente Comunitário (Peso: 25 pts)', 25)
             ]
         },
         'idoso': {
             'titulo': "👵 C6: Pessoa Idosa",
             'metricas': [
-                ('[Status] Avaliação AMPI (12m)', 'Avaliação Multidimensional (Peso: 100 pts)', 100)
+                ('[Status] Avaliação AMPI (12m)', 'Avaliação AMPI/IVCF-20 (Peso: 40 pts)', 40),
+                ('[Status] Influenza (12m)', 'Vacina Influenza (Peso: 20 pts)', 20),
+                ('[Status] Peso/Altura (≥2)', 'Peso e Altura (Peso: 20 pts)', 20),
+                ('[Status] Visitas ACS (≥2)', 'Visitas do Agente Comunitário (Peso: 20 pts)', 20)
             ]
         }
     }
@@ -341,7 +355,7 @@ with tabs[1]:
         # (K) Odontologia na Gestação
         df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos odontológicos no pré-natal', r.get('Quantidade de atendimentos odontológicos', 0)), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
         
-       def construir_mensagem_customizada(row):
+        def construir_mensagem_customizada(row):
             pendencias = []
             if "🔴" in str(row.get('[Status] Captação (≤12 sem)', '')): pendencias.append("primeira consulta até a 12ª semana")
             if "🔴" in str(row.get('[Status] Consultas (≥7)', '')): pendencias.append("consultas mínimas de pré-natal")
