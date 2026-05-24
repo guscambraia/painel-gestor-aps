@@ -21,14 +21,12 @@ if "autenticado" not in st.session_state:
 
 # ================= SISTEMA DE AUTENTICAÇÃO =================
 def verificar_login(usuario, senha):
-    # Verifica se os Secrets foram configurados (na nuvem ou no arquivo .streamlit/secrets.toml)
     if "credentials" in st.secrets and "usernames" in st.secrets["credentials"]:
         usuarios_cadastrados = st.secrets["credentials"]["usernames"]
         if usuario in usuarios_cadastrados and usuarios_cadastrados[usuario] == senha:
             return True
     return False
 
-# TELA DE LOGIN (Interrompe o app se não estiver logado)
 if not st.session_state["autenticado"]:
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
@@ -50,13 +48,10 @@ if not st.session_state["autenticado"]:
                 else:
                     st.error("Usuário ou senha incorretos. Tente novamente.")
     
-    # st.stop() impede que o restante do código seja carregado antes do login
     st.stop()
 
 
-# ================= APLICATIVO PRINCIPAL (SÓ APARECE SE LOGADO) =================
-
-# Barra lateral com botão de Logout
+# ================= BARRA LATERAL =================
 st.sidebar.markdown(f"👤 Logado como: **{st.session_state['usuario_atual']}**")
 if st.sidebar.button("Sair do Sistema 🔒", use_container_width=True):
     st.session_state["autenticado"] = False
@@ -64,6 +59,9 @@ if st.sidebar.button("Sair do Sistema 🔒", use_container_width=True):
     st.rerun()
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("### 📍 Filtro de Território")
+st.session_state['microarea_filtro'] = st.sidebar.text_input("Filtrar por Microárea (Ex: 01, 02...)", placeholder="Deixe em branco para ver todas")
+
 
 # ================= FUNÇÕES AUXILIARES DE BACKEND =================
 @st.cache_data
@@ -109,7 +107,7 @@ def status_validade(data, meses_validade):
     validade = data + relativedelta(months=meses_validade)
     dias = (validade - hoje).days
     if dias < 0: return "🔴 Vencido"
-    elif dias <= 30: return f"🟡 Atenção ({dias}d)"
+    elif dias <= 30: return f"🟠 Atenção ({dias}d)"
     else: return "🟢 Em dia"
 
 def checar_qtd(valor, minimo):
@@ -136,20 +134,61 @@ def gerar_link_wpp_custom(telefone, mensagem):
     if len(num) < 10: return None
     return f"https://wa.me/55{num}?text={urllib.parse.quote(mensagem)}"
 
+# ================= NOVA INTERFACE DE FILTROS =================
 def interface_filtros_e_exportacao(df_view, colunas_status, chave, arquivo):
-    df_view['Tem Pendência?'] = df_view[colunas_status].apply(lambda r: 'Sim' if any('🔴' in str(v) or '🟡' in str(v) for v in r) else 'Não', axis=1)
+    # 1. Filtro Global de Microárea
+    if 'microarea_filtro' in st.session_state and st.session_state['microarea_filtro'].strip() != "":
+        if 'Microárea' in df_view.columns:
+            df_view = df_view[df_view['Microárea'].astype(str).str.contains(st.session_state['microarea_filtro'].strip(), na=False)]
+
+    df_view['Tem Pendência?'] = df_view[colunas_status].apply(
+        lambda r: 'Sim' if any('🔴' in str(v) or '🟠' in str(v) or '🟡' in str(v) for v in r) else 'Não', axis=1
+    )
+
+    st.markdown("#### 🔍 Filtros de Visualização")
+    c1, c2, c3 = st.columns(3)
     
-    c1, c2 = st.columns([2, 1])
     with c1:
-        filtro = st.radio("Filtro:", ["Todos", "Somente com Pendências (🔴/🟡)"], horizontal=True, key=f"rad_{chave}")
-    
-    df_filtrado = df_view[df_view['Tem Pendência?'] == 'Sim'] if filtro != "Todos" else df_view
+        status_geral = st.selectbox("Status Global:", ["Todos", "Somente com Pendências (🔴)", "Somente em Dia (🟢)"], key=f"stat_{chave}")
     
     with c2:
-        csv_data = df_filtrado.drop(columns=['Busca Ativa', 'Tem Pendência?'], errors='ignore').to_csv(index=False, sep=';').encode('latin-1', errors='ignore')
-        st.download_button("📥 Exportar Relatório CSV", data=csv_data, file_name=f"{arquivo}_{datetime.today().strftime('%d-%m-%Y')}.csv", mime="text/csv", key=f"dl_{chave}")
+        opcoes_colunas = ["Todas as métricas"] + colunas_status
+        filtro_especifico = st.selectbox("Filtrar Pendência Específica:", opcoes_colunas, key=f"col_{chave}")
+
+    risco_filtro = "Todos"
+    if 'Estratificação de risco cardiovascular' in df_view.columns:
+        with c3:
+            risco_filtro = st.selectbox("Risco Cardiovascular:", ["Todos", "Alto", "Moderado", "Baixo"], key=f"risco_{chave}")
+
+    # Aplicação dos Filtros
+    df_filtrado = df_view.copy()
     
-    st.metric("Total na lista exportada/exibida:", len(df_filtrado))
+    if status_geral == "Somente com Pendências (🔴)":
+        df_filtrado = df_filtrado[df_filtrado['Tem Pendência?'] == 'Sim']
+    elif status_geral == "Somente em Dia (🟢)":
+        df_filtrado = df_filtrado[df_filtrado['Tem Pendência?'] == 'Não']
+
+    if filtro_especifico != "Todas as métricas":
+        df_filtrado = df_filtrado[df_filtrado[filtro_especifico].astype(str).str.contains('🔴|🟠', regex=True, na=False)]
+
+    if risco_filtro != "Todos" and 'Estratificação de risco cardiovascular' in df_filtrado.columns:
+        df_filtrado = df_filtrado[df_filtrado['Estratificação de risco cardiovascular'].astype(str).str.contains(risco_filtro, na=False, case=False)]
+
+    # Ordenação Inteligente (Priorização Clínica)
+    if 'Estratificação de risco cardiovascular' in df_filtrado.columns:
+        df_filtrado['Sort_Risco'] = df_filtrado['Estratificação de risco cardiovascular'].map({'Alto': 1, 'Moderado': 2, 'Baixo': 3}).fillna(4)
+        df_filtrado = df_filtrado.sort_values(by=['Sort_Risco', 'Nome']).drop(columns=['Sort_Risco'])
+    elif '🚨 Alerta DPP' in df_filtrado.columns:
+        df_filtrado = df_filtrado.sort_values(by=['🚨 Alerta DPP', 'Nome'], ascending=[False, True])
+
+    # Exportação e Resumo
+    st.write("")
+    c_exp1, c_exp2 = st.columns([3, 1])
+    c_exp1.metric("Total de pacientes na lista abaixo:", len(df_filtrado))
+    
+    csv_data = df_filtrado.drop(columns=['Busca Ativa', 'Tem Pendência?'], errors='ignore').to_csv(index=False, sep=';').encode('latin-1', errors='ignore')
+    c_exp2.download_button("📥 Exportar Lista (CSV)", data=csv_data, file_name=f"{arquivo}_{datetime.today().strftime('%d-%m-%Y')}.csv", mime="text/csv", key=f"dl_{chave}", use_container_width=True)
+    
     return df_filtrado.drop(columns=['Tem Pendência?'])
 
 # ================= INTERFACE PRINCIPAL EM ABAS =================
@@ -167,8 +206,8 @@ tabs = st.tabs([
 
 # ----------------- 0. DASHBOARD GERAL -----------------
 with tabs[0]:
-    st.header("📊 Painel Analítico de Qualidade (Novo Modelo MS)")
-    st.markdown("Cálculo baseado nas Notas Metodológicas C1-C7. A pontuação final é a soma proporcional das boas práticas realizadas pelo público elegível. **Clique em 'Ver pacientes pendentes' abaixo das métricas incompletas para visualizar a lista nominal.**")
+    st.header("📊 Painel Analítico e Previsão de Metas (MS)")
+    st.markdown("Cálculo baseado no **Novo Cofinanciamento da APS (Portaria 3.493/2024)**. O painel prevê o esforço necessário para atingir o parâmetro **Ótimo (75%)**.")
     
     estrutura_dashboard = {
         'gest': {
@@ -209,37 +248,35 @@ with tabs[0]:
         'diab': {
             'titulo': "🩸 C4: Diabetes Mellitus",
             'metricas': [
-                # As métricas de consulta e PA devem ser mapeadas na Tab 4 se ainda não existirem lá.
-                # Aqui utilizamos pesos aproximados para fechar os 100 pontos das 6 boas práticas.
-                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada (Peso: 20 pts)', 20),
-                ('[Status] Pé Diabético (15m)', 'Rastreio do Pé Diabético (Peso: 20 pts)', 20), # Lembre-se de mudar a variável na aba para 12m
-                ('[Status] Peso/Altura (12m)', 'Peso e Altura (Peso: 20 pts)', 20),
-                ('[Status] Visitas ACS (≥2)', 'Visitas do Agente Comunitário (Peso: 40 pts)', 40)
+                ('[Status] HbA1c (12m)', '(E) Hemoglobina Glicada (Peso: 20 pts)', 20),
+                ('[Status] Pé Diabético (12m)', '(F) Rastreio do Pé Diabético (Peso: 20 pts)', 20),
+                ('[Status] Peso/Altura (12m)', '(C) Peso e Altura (Peso: 20 pts)', 20),
+                ('[Status] Visitas ACS (≥2)', '(D) Visitas ACS (Peso: 40 pts)', 40)
             ]
         },
         'hiper': {
             'titulo': "🫀 C5: Hipertensão Arterial",
             'metricas': [
-                ('[Status] Consulta e PA (6m)', 'Consulta e PA Semestral (Peso: 50 pts)', 50),
-                ('[Status] Peso/Altura (12m)', 'Peso e Altura Anual (Peso: 25 pts)', 25),
-                ('[Status] Visitas ACS', 'Visitas do Agente Comunitário (Peso: 25 pts)', 25)
+                ('[Status] Consulta e PA (6m)', '(A/B) Consulta e PA Semestral (Peso: 50 pts)', 50),
+                ('[Status] Peso/Altura (12m)', '(C) Peso e Altura Anual (Peso: 25 pts)', 25),
+                ('[Status] Visitas ACS', '(D) Visitas ACS (Peso: 25 pts)', 25)
             ]
         },
         'idoso': {
             'titulo': "👵 C6: Pessoa Idosa",
             'metricas': [
-                ('[Status] Avaliação AMPI (12m)', 'Avaliação AMPI/IVCF-20 (Peso: 40 pts)', 40),
-                ('[Status] Influenza (12m)', 'Vacina Influenza (Peso: 20 pts)', 20),
-                ('[Status] Peso/Altura (≥2)', 'Peso e Altura (Peso: 20 pts)', 20),
-                ('[Status] Visitas ACS (≥2)', 'Visitas do Agente Comunitário (Peso: 20 pts)', 20)
+                ('[Status] Avaliação AMPI (12m)', '(A) Avaliação AMPI (Peso: 30 pts)', 30),
+                ('[Status] Influenza (12m)', '(D) Vacina Influenza (Peso: 30 pts)', 30),
+                ('[Status] Peso/Altura (≥2)', '(B) Peso e Altura (Peso: 20 pts)', 20),
+                ('[Status] Visitas ACS (≥2)', '(C) Visitas ACS (Peso: 20 pts)', 20)
             ]
         }
     }
     
     def classificar_desempenho(nota):
-        if nota > 75: return "🔵 ÓTIMO", "#0047AB"
-        elif nota > 50: return "🟢 BOM", "#2E8B57"
-        elif nota > 25: return "🟡 SUFICIENTE", "#DAA520"
+        if nota >= 75: return "🔵 ÓTIMO", "#0047AB"
+        elif nota >= 50: return "🟢 BOM", "#2E8B57"
+        elif nota >= 25: return "🟡 SUFICIENTE", "#DAA520"
         else: return "🔴 REGULAR", "#DC143C"
 
     col_dash1, col_dash2 = st.columns(2)
@@ -252,6 +289,11 @@ with tabs[0]:
                 st.markdown(f"<h3 style='margin-bottom: 0px;'>{dados_ind['titulo']}</h3>", unsafe_allow_html=True)
                 df_atual = st.session_state[f'dados_{chave}']
                 
+                # Se o filtro de microárea estiver ativo, refletimos no dashboard também
+                if df_atual is not None and 'microarea_filtro' in st.session_state and st.session_state['microarea_filtro'].strip() != "":
+                    if 'Microárea' in df_atual.columns:
+                        df_atual = df_atual[df_atual['Microárea'].astype(str).str.contains(st.session_state['microarea_filtro'].strip(), na=False)]
+
                 if df_atual is not None and len(df_atual) > 0:
                     nota_final_indicador = 0
                     st.write("")
@@ -268,44 +310,51 @@ with tabs[0]:
                                 pontos_ganhos = perc_cobertura * peso
                                 nota_final_indicador += pontos_ganhos
                                 
+                                # LÓGICA DE CÁLCULO DE META (75%)
+                                meta_pct = 0.75 
+                                meta_pacientes = math.ceil(total_elegivel * meta_pct)
+                                faltam_meta = meta_pacientes - em_dia
+                                
+                                if perc_cobertura >= meta_pct:
+                                    texto_meta = "🎯 **Meta Atingida! (≥ 75%)**"
+                                else:
+                                    texto_meta = f"📉 Faltam **{faltam_meta}** pacientes para atingir a meta ótima (75%)"
+                                
                                 st.markdown(f"**{label}**")
                                 st.progress(min(perc_cobertura, 1.0))
                                 
                                 c_met1, c_met2 = st.columns([1, 2])
-                                c_met1.metric(label="Cobertura", value=f"{perc_cobertura*100:.1f}%")
+                                c_met1.metric(label="Cobertura Atual", value=f"{perc_cobertura*100:.1f}%")
                                 
-                                if perc_cobertura == 1.0:
-                                    c_met2.markdown(f"<small>Elegíveis: {total_elegivel} | Em dia: {em_dia}<br>Pontos: **{pontos_ganhos:.1f} / {peso}** 🎉</small>", unsafe_allow_html=True)
-                                else:
-                                    faltam = total_elegivel - em_dia
-                                    c_met2.markdown(f"<small>Elegíveis: {total_elegivel} | Pendentes: {faltam} 🚨<br>Pontos: **{pontos_ganhos:.1f} / {peso}**</small>", unsafe_allow_html=True)
-                                    
-                                    nome_indicador_curto = label.split(' (')[0]
-                                    with st.expander(f"📋 Ver os {faltam} pacientes pendentes para {nome_indicador_curto}"):
-                                        df_pendentes = df_elegivel[df_elegivel[col_status].astype(str).str.contains('🔴', na=False)]
-                                        
+                                c_met2.markdown(f"<small>Elegíveis: {total_elegivel} | Em dia: {em_dia}<br>{texto_meta}</small>", unsafe_allow_html=True)
+                                
+                                nome_indicador_curto = label.split(' (')[0].replace("(A)", "").replace("(B)", "").strip()
+                                faltam_total = total_elegivel - em_dia
+                                if faltam_total > 0:
+                                    with st.expander(f"📋 Ver todos os {faltam_total} pendentes para {nome_indicador_curto}"):
+                                        df_pendentes = df_elegivel[df_elegivel[col_status].astype(str).str.contains('🔴|🟠', regex=True, na=False)]
                                         cols_mostrar = ['Nome']
                                         if 'Idade' in df_pendentes.columns: cols_mostrar.append('Idade')
-                                        if 'IG (DUM) (semanas)' in df_pendentes.columns: cols_mostrar.append('IG (DUM) (semanas)')
+                                        if '🚨 Alerta DPP' in df_pendentes.columns: cols_mostrar.append('🚨 Alerta DPP')
+                                        if 'Estratificação de risco cardiovascular' in df_pendentes.columns: cols_mostrar.append('Estratificação de risco cardiovascular')
                                         if 'Busca Ativa' in df_pendentes.columns: cols_mostrar.append('Busca Ativa')
                                         
                                         st.dataframe(
                                             df_pendentes[cols_mostrar],
                                             column_config={"Busca Ativa": st.column_config.LinkColumn("📲 Busca Ativa", display_text="📲 Contatar")},
-                                            hide_index=True,
-                                            use_container_width=True
+                                            hide_index=True, use_container_width=True
                                         )
                                 st.write("") 
                     
                     status_texto, cor = classificar_desempenho(nota_final_indicador)
                     st.markdown(f"""
                     <div style='padding: 12px; border-radius: 8px; border: 2px solid {cor}; background-color: {cor}15; margin-top: 5px;'>
-                        <h4 style='margin:0; color: {cor}; text-align: center; font-size: 1.2rem;'>NOTA FINAL: {nota_final_indicador:.1f} / 100</h4>
+                        <h4 style='margin:0; color: {cor}; text-align: center; font-size: 1.2rem;'>PROJEÇÃO DE NOTA: {nota_final_indicador:.1f} / 100</h4>
                         <p style='margin:0; color: {cor}; text-align: center; font-weight: bold; font-size: 1rem;'>DESEMPENHO {status_texto}</p>
                     </div>
                     """, unsafe_allow_html=True)
                 else:
-                    st.info("Aguardando carregamento da planilha na aba correspondente.")
+                    st.info("Aguardando carregamento da planilha ou filtro não encontrou pacientes.")
                     
 # ----------------- 1. GESTANTE E PUÉRPERA -----------------
 with tabs[1]:
@@ -313,22 +362,23 @@ with tabs[1]:
     file_gest = st.file_uploader("Carregue GESTAÇÃO E PUERPERIO.csv", key="gest")
     if file_gest:
         df = carregar_dados_esus(file_gest)
+        
+        # ALERTA DE PARTO IMINENTE (DPP)
+        df = limpar_datas(df, ['DPP'])
+        if 'DPP' in df.columns:
+            df['Dias_Parto'] = (df['DPP'] - datetime.today()).dt.days
+            df['🚨 Alerta DPP'] = df['Dias_Parto'].apply(lambda x: "⚠️ Iminente (≤30d)" if pd.notna(x) and 0 <= x <= 30 else ("⚪ N/A"))
+            
         df['IG_Num'] = df['IG (DUM) (semanas)'].apply(obter_ig_num := lambda x: int(float(str(x).replace(',', '.'))) if pd.notna(x) and str(x).strip() not in ['-', ''] else 0)
         df['[Status] Estado'] = df['IG_Num'].apply(lambda x: "🤰 Gestante" if 0 < x <= 42 else ("👶 Puérpera" if x >= 43 else "📋 Pós-parto / Sem IG"))
         
-        # (A, B, C, D) Consultas e Antropometria
         df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no pré-natal', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
         df['[Status] Captação (≤12 sem)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos até 12 semanas no pré-natal', 0), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
         df['[Status] PA (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições de pressão arterial', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
         df['[Status] Peso/Altura (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições simultâneas de peso e altura', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-        
-        # (E) Visita Domiciliar na Gestação (Exige 3)
         df['[Status] VD ACS Gestação (≥3)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no pré-natal', r.get('Quantidade de visitas domiciliares', 0)), 3) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-        
-        # (F) Vacina dTpa
         df['[Status] Vacina dTpa'] = df.apply(lambda r: "⚪ N/A" if r['[Status] Estado'] == "🤰 Gestante" and r['IG_Num'] < 20 else ("🟢 Ok" if pd.notna(r.get('dTpa')) and r.get('dTpa') != '-' else "🔴 Pendente"), axis=1)
 
-        # (G) Testes 1º Trimestre (Agora exige HIV, Sífilis, Hep B e Hep C)
         def testes_1tri(r):
             if r['[Status] Estado'] != "🤰 Gestante": return "⚪ N/A"
             hiv = str(r.get('Exame de HIV no primeiro trimestre', '')).strip().upper() == 'SIM'
@@ -339,7 +389,6 @@ with tabs[1]:
             
         df['[Status] Testes 1ºTri'] = df.apply(testes_1tri, axis=1)
 
-        # (H) Testes 3º Trimestre (Exige HIV e Sífilis)
         def testes_3tri(r):
             if r['[Status] Estado'] != "🤰 Gestante": return "⚪ N/A"
             hiv = str(r.get('Exame de HIV no terceiro trimestre', '')).strip().upper() == 'SIM'
@@ -348,11 +397,8 @@ with tabs[1]:
             
         df['[Status] Testes 3ºTri'] = df.apply(testes_3tri, axis=1)
         
-        # (I) Consulta Puerpério e (J) Visita Puerpério (Separados na nova regra)
         df['[Status] Cons. Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
         df['[Status] VD Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
-
-        # (K) Odontologia na Gestação
         df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos odontológicos no pré-natal', r.get('Quantidade de atendimentos odontológicos', 0)), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
         
         def construir_mensagem_customizada(row):
@@ -379,8 +425,12 @@ with tabs[1]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = [c for c in df.columns if '[Status]' in c]
-        df_view = df[['Nome', 'IG (DUM) (semanas)'] + cols_status + ['Busca Ativa']]
         
+        cols_view = ['Nome', 'IG (DUM) (semanas)']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        if '🚨 Alerta DPP' in df.columns: cols_view.append('🚨 Alerta DPP')
+            
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
         st.session_state['dados_gest'] = df_view.copy()
         
         df_final = interface_filtros_e_exportacao(df_view, cols_status, 'gest', 'Gestantes')
@@ -422,8 +472,11 @@ with tabs[2]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = [c for c in df.columns if '[Status]' in c]
-        df_view = df[['Nome', 'Idade'] + cols_status + ['Busca Ativa']]
         
+        cols_view = ['Nome', 'Idade']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
         st.session_state['dados_inf'] = df_view.copy()
         
         df_final = interface_filtros_e_exportacao(df_view, cols_status, 'inf', 'Criancas')
@@ -458,8 +511,11 @@ with tabs[3]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = [c for c in df.columns if '[Status]' in c]
-        df_view = df[['Nome', 'Idade'] + cols_status + ['Busca Ativa']]
         
+        cols_view = ['Nome', 'Idade']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
         st.session_state['dados_mul'] = df_view.copy()
         
         df_final = interface_filtros_e_exportacao(df_view, cols_status, 'mul', 'SaudeMulher')
@@ -474,14 +530,14 @@ with tabs[4]:
         df = limpar_datas(df, ['Data da última avaliação de hemoglobina glicada', 'Data da avaliação dos pés', 'Data da ultima medição de peso e altura'])
         
         df['[Status] HbA1c (12m)'] = df['Data da última avaliação de hemoglobina glicada'].apply(lambda x: status_validade(x, 12))
-        df['[Status] Pé Diabético (15m)'] = df['Data da avaliação dos pés'].apply(lambda x: status_validade(x, 15))
+        df['[Status] Pé Diabético (12m)'] = df['Data da avaliação dos pés'].apply(lambda x: status_validade(x, 12)) 
         df['[Status] Peso/Altura (12m)'] = df['Data da ultima medição de peso e altura'].apply(lambda x: status_validade(x, 12))
         df['[Status] Visitas ACS (≥2)'] = df['Quantidade de visitas domiciliares'].apply(lambda x: checar_qtd(x, 2))
         
         def construir_mensagem_diabetes(row):
             pendencias = []
             if "🔴" in str(row.get('[Status] HbA1c (12m)', '')): pendencias.append("o exame de Hemoglobina Glicada (HbA1c)")
-            if "🔴" in str(row.get('[Status] Pé Diabético (15m)', '')): pendencias.append("o exame clínico dos pés")
+            if "🔴" in str(row.get('[Status] Pé Diabético (12m)', '')): pendencias.append("o exame clínico dos pés")
             if "🔴" in str(row.get('[Status] Peso/Altura (12m)', '')): pendencias.append("a medição de peso e altura")
             if "🔴" in str(row.get('[Status] Visitas ACS (≥2)', '')): pendencias.append("as visitas do Agente Comunitário")
             nome = str(row.get('Nome', '')).strip()
@@ -493,8 +549,12 @@ with tabs[4]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = [c for c in df.columns if '[Status]' in c]
-        df_view = df[['Nome', 'Idade'] + cols_status + ['Busca Ativa']]
         
+        cols_view = ['Nome', 'Idade']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        if 'Estratificação de risco cardiovascular' in df.columns: cols_view.append('Estratificação de risco cardiovascular')
+        
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
         st.session_state['dados_diab'] = df_view.copy()
         
         df_final = interface_filtros_e_exportacao(df_view, cols_status, 'diab', 'Diabetes')
@@ -543,8 +603,12 @@ with tabs[5]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = [c for c in df.columns if '[Status]' in c]
-        df_view = df[['Nome', 'Idade'] + cols_status + ['Busca Ativa']]
         
+        cols_view = ['Nome', 'Idade']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        if 'Estratificação de risco cardiovascular' in df.columns: cols_view.append('Estratificação de risco cardiovascular')
+        
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
         st.session_state['dados_hiper'] = df_view.copy()
         
         df_final = interface_filtros_e_exportacao(df_view, cols_status, 'hiper', 'Hipertensao')
@@ -578,8 +642,11 @@ with tabs[6]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = [c for c in df.columns if '[Status]' in c]
-        df_view = df[['Nome', 'Idade'] + cols_status + ['Busca Ativa']]
         
+        cols_view = ['Nome', 'Idade']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
         st.session_state['dados_idoso'] = df_view.copy()
         
         df_final = interface_filtros_e_exportacao(df_view, cols_status, 'idoso', 'Idoso')
@@ -610,9 +677,12 @@ with tabs[7]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = ['[Status] Atualização', '[Status] Documento', '[Status] Telefone']
-        df_view = df[['Nome', 'Microárea', 'CPF/CNS', 'Telefone celular'] + cols_status + ['Busca Ativa']]
-        df_final = interface_filtros_e_exportacao(df_view, cols_status, 'cad', 'Auditoria_Cadastros')
+        cols_view = ['Nome']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
+        cols_view.extend(['CPF/CNS', 'Telefone celular'])
         
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
+        df_final = interface_filtros_e_exportacao(df_view, cols_status, 'cad', 'Auditoria_Cadastros')
         st.dataframe(df_final, column_config={"Busca Ativa": st.column_config.LinkColumn("📲 Busca Ativa", display_text="📲 Contatar")}, hide_index=True, use_container_width=True)
 
 # ----------------- 8. ACOMPANHAMENTO GERAL -----------------
@@ -652,7 +722,9 @@ with tabs[8]:
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
         cols_status = ['[Status] Vínculo Clínico', '[Status] Visita ACS']
-        df_view = df[['Nome', 'Idade', 'Microárea'] + cols_status + ['Busca Ativa']]
-        df_final = interface_filtros_e_exportacao(df_view, cols_status, 'geral', 'Faltosos_e_Visitas')
+        cols_view = ['Nome', 'Idade']
+        if 'Microárea' in df.columns: cols_view.append('Microárea')
         
+        df_view = df[cols_view + cols_status + ['Busca Ativa']]
+        df_final = interface_filtros_e_exportacao(df_view, cols_status, 'geral', 'Faltosos_e_Visitas')
         st.dataframe(df_final, column_config={"Busca Ativa": st.column_config.LinkColumn("📲 Busca Ativa", display_text="📲 Contatar")}, hide_index=True, use_container_width=True)
