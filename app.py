@@ -363,10 +363,12 @@ with tabs[0]:
     
     if st.session_state['dados_gest'] is not None:
         df_g = st.session_state['dados_gest']
-        n_partos = len(df_g[df_g['🚨 Alerta DPP'].astype(str).str.contains('Iminente', na=False)])
-        if n_partos > 0:
-            alertas_html += f"<li>⚠️ <b>{n_partos} Gestante(s)</b> com parto previsto para os próximos 30 dias. Cheque a aba Gestantes!</li>"
-            qtd_alertas += n_partos
+        # TRAVA DE SEGURANÇA: Só tenta contar se a coluna existir no CSV exportado pelo e-SUS
+        if '🚨 Alerta DPP' in df_g.columns:
+            n_partos = len(df_g[df_g['🚨 Alerta DPP'].astype(str).str.contains('Iminente', na=False)])
+            if n_partos > 0:
+                alertas_html += f"<li>⚠️ <b>{n_partos} Gestante(s)</b> com parto previsto para os próximos 30 dias. Cheque a aba Gestantes!</li>"
+                qtd_alertas += n_partos
 
     for ind in ['diab', 'hiper']:
         if st.session_state[f'dados_{ind}'] is not None:
