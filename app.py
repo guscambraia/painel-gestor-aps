@@ -1,4 +1,4 @@
-import streamlit as st
+treamlit as st
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -174,10 +174,17 @@ with tabs[0]:
         'gest': {
             'titulo': "🤰 C3: Gestantes e Puérperas",
             'metricas': [
-                ('[Status] Consultas (≥7)', 'Consultas (Peso: 25 pts)', 25),
-                ('[Status] Captação (≤12 sem)', 'Captação Precoce (Peso: 25 pts)', 25),
-                ('[Status] Testes 1ºTri', 'Testes Rápidos 1º Tri (Peso: 25 pts)', 25),
-                ('[Status] Vacina dTpa', 'Vacinação dTpa (Peso: 25 pts)', 25)
+                ('[Status] Captação (≤12 sem)', '(A) Captação Precoce (Peso: 10 pts)', 10),
+                ('[Status] Consultas (≥7)', '(B) Consultas Pré-natal (Peso: 9 pts)', 9),
+                ('[Status] PA (≥7)', '(C) Aferição de PA (Peso: 9 pts)', 9),
+                ('[Status] Peso/Altura (≥7)', '(D) Medição Peso/Altura (Peso: 9 pts)', 9),
+                ('[Status] VD ACS Gestação (≥3)', '(E) Visitas ACS Gestação (Peso: 9 pts)', 9),
+                ('[Status] Vacina dTpa', '(F) Vacinação dTpa (Peso: 9 pts)', 9),
+                ('[Status] Testes 1ºTri', '(G) Testes 1º Tri (Sífilis, HIV, Hep B/C) (Peso: 9 pts)', 9),
+                ('[Status] Testes 3ºTri', '(H) Testes 3º Tri (Sífilis, HIV) (Peso: 9 pts)', 9),
+                ('[Status] Cons. Puerpério', '(I) Consulta Puerpério (Peso: 9 pts)', 9),
+                ('[Status] VD Puerpério', '(J) Visita ACS Puerpério (Peso: 9 pts)', 9),
+                ('[Status] Odonto Gestação', '(K) Atendimento Odontológico (Peso: 9 pts)', 9)
             ]
         },
         'inf': {
@@ -295,36 +302,65 @@ with tabs[1]:
         df['IG_Num'] = df['IG (DUM) (semanas)'].apply(obter_ig_num := lambda x: int(float(str(x).replace(',', '.'))) if pd.notna(x) and str(x).strip() not in ['-', ''] else 0)
         df['[Status] Estado'] = df['IG_Num'].apply(lambda x: "🤰 Gestante" if 0 < x <= 42 else ("👶 Puérpera" if x >= 43 else "📋 Pós-parto / Sem IG"))
         
-        df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r['Quantidade de atendimentos no pré-natal'], 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-        df['[Status] Captação (≤12 sem)'] = df.apply(lambda r: checar_qtd(r['Quantidade de atendimentos até 12 semanas no pré-natal'], 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-        df['[Status] PA (≥7)'] = df.apply(lambda r: checar_qtd(r['Quantidade de medições de pressão arterial'], 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-        df['[Status] Peso/Altura (≥7)'] = df.apply(lambda r: checar_qtd(r['Quantidade de medições simultâneas de peso e altura'], 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+        # (A, B, C, D) Consultas e Antropometria
+        df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no pré-natal', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+        df['[Status] Captação (≤12 sem)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos até 12 semanas no pré-natal', 0), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+        df['[Status] PA (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições de pressão arterial', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+        df['[Status] Peso/Altura (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições simultâneas de peso e altura', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
         
-        def testes_tri(r, tri):
+        # (E) Visita Domiciliar na Gestação (Exige 3)
+        df['[Status] VD ACS Gestação (≥3)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no pré-natal', r.get('Quantidade de visitas domiciliares', 0)), 3) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+        
+        # (F) Vacina dTpa
+        df['[Status] Vacina dTpa'] = df.apply(lambda r: "⚪ N/A" if r['[Status] Estado'] == "🤰 Gestante" and r['IG_Num'] < 20 else ("🟢 Ok" if pd.notna(r.get('dTpa')) and r.get('dTpa') != '-' else "🔴 Pendente"), axis=1)
+
+        # (G) Testes 1º Trimestre (Agora exige HIV, Sífilis, Hep B e Hep C)
+        def testes_1tri(r):
             if r['[Status] Estado'] != "🤰 Gestante": return "⚪ N/A"
-            hiv = str(r.get(f'Exame de HIV no {tri} trimestre', '')).strip().upper() == 'SIM'
-            sifilis = str(r.get(f'Exame de Sífilis no {tri} trimestre)', r.get(f'Exame de Sifilis no {tri} trimestre', ''))).strip().upper() == 'SIM'
+            hiv = str(r.get('Exame de HIV no primeiro trimestre', '')).strip().upper() == 'SIM'
+            sifilis = str(r.get('Exame de Sífilis no primeiro trimestre', r.get('Exame de Sifilis no primeiro trimestre', ''))).strip().upper() == 'SIM'
+            hep_b = str(r.get('Exame de Hepatite B no primeiro trimestre', '')).strip().upper() == 'SIM'
+            hep_c = str(r.get('Exame de Hepatite C no primeiro trimestre', '')).strip().upper() == 'SIM'
+            return "🟢 Ok" if (hiv and sifilis and hep_b and hep_c) else "🔴 Pendente"
+            
+        df['[Status] Testes 1ºTri'] = df.apply(testes_1tri, axis=1)
+
+        # (H) Testes 3º Trimestre (Exige HIV e Sífilis)
+        def testes_3tri(r):
+            if r['[Status] Estado'] != "🤰 Gestante": return "⚪ N/A"
+            hiv = str(r.get('Exame de HIV no terceiro trimestre', '')).strip().upper() == 'SIM'
+            sifilis = str(r.get('Exame de Sífilis no terceiro trimestre', r.get('Exame de Sifilis no terceiro trimestre', ''))).strip().upper() == 'SIM'
             return "🟢 Ok" if (hiv and sifilis) else "🔴 Pendente"
             
-        df['[Status] Testes 1ºTri'] = df.apply(lambda r: testes_tri(r, 'primeiro'), axis=1)
-        df['[Status] Testes 3ºTri'] = df.apply(lambda r: testes_tri(r, 'terceiro'), axis=1)
-        df['[Status] Vacina dTpa'] = df.apply(lambda r: "⚪ N/A" if r['[Status] Estado'] == "🤰 Gestante" and r['IG_Num'] < 20 else ("🟢 Ok" if pd.notna(r['dTpa']) and r['dTpa'] != '-' else "🔴 Pendente"), axis=1)
-        df['[Status] Puerpério (Cons+VD)'] = df.apply(lambda r: "🟢 Ok" if (str(r.get('Quantidade de atendimentos no puerpério','0')).isdigit() and int(r.get('Quantidade de atendimentos no puerpério','0')) >= 1) and (str(r.get('Quantidade de visitas domiciliares no puerpério','0')).isdigit() and int(r.get('Quantidade de visitas domiciliares no puerpério','0')) >= 1) else "🔴 Pendente" if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
+        df['[Status] Testes 3ºTri'] = df.apply(testes_3tri, axis=1)
         
-        def construir_mensagem_customizada(row):
-            pendencias = []
-            if "🔴" in str(row.get('[Status] Consultas (≥7)', '')): pendencias.append("consultas mínimas de pré-natal")
-            if "🔴" in str(row.get('[Status] Captação (≤12 sem)', '')): pendencias.append("consulta precoce antes da 12ª semana")
-            if "🔴" in str(row.get('[Status] PA (≥7)', '')): pendencias.append("registros de aferição de pressão arterial")
-            if "🔴" in str(row.get('[Status] Peso/Altura (≥7)', '')): pendencias.append("registros de peso e altura")
-            if "🔴" in str(row.get('[Status] Testes 1ºTri', '')): pendencias.append("testes rápidos do primeiro trimestre")
-            if "🔴" in str(row.get('[Status] Testes 3ºTri', '')): pendencias.append("testes rápidos do terceiro trimestre")
-            if "🔴" in str(row.get('[Status] Vacina dTpa', '')): pendencias.append("vacina dTpa (tétano e coqueluche)")
-            if "🔴" in str(row.get('[Status] Puerpério (Cons+VD)', '')): pendencias.append("consulta de pós-parto ou visita do ACS")
-            if not pendencias: return f"Olá {row['Nome']}, aqui é da equipe de saúde! Todos os seus registros estão atualizados no sistema. Parabéns!"
-            itens_texto = pendencias[0] if len(pendencias) == 1 else ", ".join(pendencias[:-1]) + " e " + pendencias[-1]
-            return f"Olá {row['Nome']}, aqui é da equipe de saúde! Verificamos no sistema que faltam atualizar os seguintes itens: {itens_texto}. Vamos agendar uma ida à unidade para regularizar?"
+        # (I) Consulta Puerpério e (J) Visita Puerpério (Separados na nova regra)
+        df['[Status] Cons. Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
+        df['[Status] VD Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
 
+        # (K) Odontologia na Gestação
+        df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos odontológicos no pré-natal', r.get('Quantidade de atendimentos odontológicos', 0)), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+        
+       def construir_mensagem_customizada(row):
+            pendencias = []
+            if "🔴" in str(row.get('[Status] Captação (≤12 sem)', '')): pendencias.append("primeira consulta até a 12ª semana")
+            if "🔴" in str(row.get('[Status] Consultas (≥7)', '')): pendencias.append("consultas mínimas de pré-natal")
+            if "🔴" in str(row.get('[Status] PA (≥7)', '')): pendencias.append("aferição de pressão arterial")
+            if "🔴" in str(row.get('[Status] Peso/Altura (≥7)', '')): pendencias.append("registros de peso e altura")
+            if "🔴" in str(row.get('[Status] VD ACS Gestação (≥3)', '')): pendencias.append("visitas do agente de saúde em casa")
+            if "🔴" in str(row.get('[Status] Vacina dTpa', '')): pendencias.append("vacina dTpa (tétano e coqueluche)")
+            if "🔴" in str(row.get('[Status] Testes 1ºTri', '')): pendencias.append("testes rápidos do 1º trimestre (incluindo Hepatites)")
+            if "🔴" in str(row.get('[Status] Testes 3ºTri', '')): pendencias.append("testes rápidos do 3º trimestre")
+            if "🔴" in str(row.get('[Status] Odonto Gestação', '')): pendencias.append("avaliação com o dentista")
+            if "🔴" in str(row.get('[Status] Cons. Puerpério', '')): pendencias.append("consulta pós-parto na unidade")
+            if "🔴" in str(row.get('[Status] VD Puerpério', '')): pendencias.append("visita pós-parto do agente de saúde")
+            
+            if not pendencias: 
+                return f"Olá {row['Nome']}, aqui é da equipe de saúde! Todos os seus registros estão atualizados no sistema. Parabéns pelo cuidado!"
+            
+            itens_texto = pendencias[0] if len(pendencias) == 1 else ", ".join(pendencias[:-1]) + " e " + pendencias[-1]
+            return f"Olá {row['Nome']}, aqui é da equipe de saúde! Verificamos no sistema que faltam atualizar os seguintes itens: {itens_texto}. Vamos agendar para regularizar?"
+            
         df['Msg_Texto'] = df.apply(construir_mensagem_customizada, axis=1)
         df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], r['Msg_Texto']), axis=1)
         
