@@ -410,10 +410,8 @@ with tabs[0]:
         </div>
         """, unsafe_allow_html=True)
     else:
-        # AQUI FOI CORRIGIDO O KEY ERROR USANDO f'dados_{k}'
         if any(st.session_state[f'dados_{k}'] is not None for k in indicadores_chaves):
             st.success("✅ Nenhum alerta clínico crítico identificado nas planilhas no momento.")
-
 
     # DICIONÁRIO DO DASHBOARD (MÉTRICAS ATUALIZADAS C2 AO C7)
     estrutura_dashboard = {
@@ -490,15 +488,17 @@ with tabs[0]:
         
         with alvo_col:
             with st.container(border=True):
-                st.markdown(f"<h3 style='margin-bottom: 0px;'>{dados_ind['titulo']}</h3>", unsafe_allow_html=True)
+                # Filtra os dados de acordo com a microárea selecionada (se houver)
                 df_atual = st.session_state[f'dados_{chave}']
-                
                 if df_atual is not None and 'microarea_filtro' in st.session_state and st.session_state['microarea_filtro'].strip() != "":
                     if 'Microárea' in df_atual.columns:
                         df_atual = df_atual[df_atual['Microárea'].astype(str).str.contains(st.session_state['microarea_filtro'].strip(), na=False)]
 
+                # ================= CÁLCULO DA NOTA MS =================
+                score_total = 0.0
+                dados_calculados = []
+                
                 if df_atual is not None and len(df_atual) > 0:
-                    st.write("")
                     for col_status, label, peso, regra in dados_ind['metricas']:
                         if col_status in df_atual.columns:
                             df_elegivel = df_atual[~df_atual[col_status].astype(str).str.contains('⚪', na=False)]
@@ -507,27 +507,87 @@ with tabs[0]:
                                 em_dia = len(df_elegivel[df_elegivel[col_status].astype(str).str.contains('🟢', na=False)])
                                 perc_cobertura = em_dia / total_elegivel
                                 
-                                meta_pct = 0.75 
-                                meta_pacientes = math.ceil(total_elegivel * meta_pct)
-                                faltam_meta = max(0, meta_pacientes - em_dia)
-                                texto_meta = "🎯 **Meta Atingida!**" if perc_cobertura >= meta_pct else f"📉 Faltam **{faltam_meta}** pacientes para atingir a meta ótima"
+                                # Adiciona a proporção da cobertura em relação ao peso da nota técnica
+                                pontos_obtidos = perc_cobertura * peso
+                                score_total += pontos_obtidos
                                 
-                                st.markdown(f"**{label}** (Peso na nota: {peso}pts)")
-                                st.caption(f"🎯 *Regra:* {regra}")
-                                
-                                cor_barra = "#2E8B57" if perc_cobertura >= 0.75 else ("#DAA520" if perc_cobertura >= 0.50 else "#DC143C")
-                                st.markdown(f"""
-                                <div style="width: 100%; background-color: #e0e0e0; border-radius: 5px;">
-                                  <div style="width: {perc_cobertura*100}%; height: 10px; background-color: {cor_barra}; border-radius: 5px;"></div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                c_met1, c_met2 = st.columns([1, 2])
-                                c_met1.metric(label="Cobertura", value=f"{perc_cobertura*100:.1f}%")
-                                c_met2.markdown(f"<small>Elegíveis: {total_elegivel} | Em dia: {em_dia}<br>{texto_meta}</small>", unsafe_allow_html=True)
-                                st.write("") 
+                                # Salva temporariamente para renderizar logo abaixo
+                                dados_calculados.append({
+                                    "col_status": col_status, "label": label, "peso": peso, "regra": regra,
+                                    "total_elegivel": total_elegivel, "em_dia": em_dia, 
+                                    "perc_cobertura": perc_cobertura, "df_elegivel": df_elegivel
+                                })
+                
+                # ================= EXIBIÇÃO DO CABEÇALHO DA CAIXA =================
+                # Lógica de Classificação do Ministério da Saúde
+                if score_total > 75:
+                    classif, cor_nota = "🌟 ÓTIMO", "#198754" # Verde
+                elif score_total > 50:
+                    classif, cor_nota = "👍 BOM", "#0d6efd" # Azul
+                elif score_total > 25:
+                    classif, cor_nota = "⚠️ SUFICIENTE", "#fd7e14" # Laranja
                 else:
-                    st.info("Faça o upload do CSV correspondente na barra lateral.")
+                    classif, cor_nota = "🚨 REGULAR", "#dc3545" # Vermelho
+                
+                st.markdown(f"<h3 style='margin-bottom: 0px;'>{dados_ind['titulo']}</h3>", unsafe_allow_html=True)
+                
+                if df_atual is not None and len(df_atual) > 0:
+                    st.markdown(f"""
+                    <div style='background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 10px; margin-top: 10px; margin-bottom: 15px; text-align: center;'>
+                        <span style='font-size: 16px; color: #495057;'>Nota Prevista (MS):</span><br>
+                        <strong style='font-size: 32px; color: {cor_nota};'>{score_total:.1f}</strong> <span style='font-size: 18px; color: #6c757d;'>/ 100</span><br>
+                        <span style='font-size: 14px; font-weight: bold; color: {cor_nota};'>{classif}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # ================= EXIBIÇÃO DAS MÉTRICAS E LISTA EXPANSÍVEL =================
+                    for item in dados_calculados:
+                        # Dados da métrica calculados no loop superior
+                        col_status, label, peso, regra = item['col_status'], item['label'], item['peso'], item['regra']
+                        total_elegivel, em_dia, perc_cobertura = item['total_elegivel'], item['em_dia'], item['perc_cobertura']
+                        df_elegivel = item['df_elegivel']
+                        
+                        meta_pct = 0.75 
+                        meta_pacientes = math.ceil(total_elegivel * meta_pct)
+                        faltam_meta = max(0, meta_pacientes - em_dia)
+                        texto_meta = "🎯 **Meta Atingida!**" if perc_cobertura >= meta_pct else f"📉 Faltam **{faltam_meta}** pacientes para atingir a meta ótima"
+                        
+                        st.markdown(f"**{label}**")
+                        st.caption(f"🎯 *Regra:* {regra}")
+                        
+                        cor_barra = "#2E8B57" if perc_cobertura >= 0.75 else ("#DAA520" if perc_cobertura >= 0.50 else "#DC143C")
+                        st.markdown(f"""
+                        <div style="width: 100%; background-color: #e0e0e0; border-radius: 5px;">
+                          <div style="width: {perc_cobertura*100}%; height: 10px; background-color: {cor_barra}; border-radius: 5px;"></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        c_met1, c_met2 = st.columns([1, 2])
+                        c_met1.metric(label="Cobertura", value=f"{perc_cobertura*100:.1f}%")
+                        c_met2.markdown(f"<small>Elegíveis: {total_elegivel} | Em dia: {em_dia} | Valor na Nota: {peso}pts<br>{texto_meta}</small>", unsafe_allow_html=True)
+                        
+                        # ----- EXIBIÇÃO DA LISTA DE PACIENTES DENTRO DO DASHBOARD -----
+                        pacientes_faltantes = total_elegivel - em_dia
+                        if pacientes_faltantes > 0:
+                            with st.expander(f"👀 Ver {pacientes_faltantes} paciente(s) com pendência nesta métrica"):
+                                df_pendentes = df_elegivel[df_elegivel[col_status].astype(str).str.contains('🔴|🟠', regex=True, na=False)]
+                                
+                                col_exibir = ['Nome']
+                                if 'Microárea' in df_pendentes.columns: col_exibir.append('Microárea')
+                                if 'Idade_Anos' in df_pendentes.columns: col_exibir.append('Idade_Anos')
+                                col_exibir.append('Busca Ativa')
+                                
+                                st.dataframe(
+                                    df_pendentes[col_exibir],
+                                    column_config={"Busca Ativa": st.column_config.LinkColumn("📲 Ação", display_text="Chamar no WPP")},
+                                    hide_index=True,
+                                    use_container_width=True
+                                )
+                        else:
+                            st.success("✅ Todos os pacientes elegíveis estão em dia com este indicador.")
+                        st.write("---")
+                else:
+                    st.info("Aguardando upload do arquivo CSV correspondente.")
 
 # ----------------- OUTRAS ABAS (RENDERIZAÇÃO) -----------------
 with tabs[1]:
