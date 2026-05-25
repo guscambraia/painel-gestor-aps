@@ -393,7 +393,7 @@ with tabs[0]:
         </div>
         """, unsafe_allow_html=True)
     else:
-        if any(st.session_state[k] is not None for k in indicadores_chaves):
+        if any(st.session_state[f'dados_{k}'] is not None for k in indicadores_chaves):
             st.success("✅ Nenhum alerta clínico crítico identificado nas planilhas no momento.")
 
 
