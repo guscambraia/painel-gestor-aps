@@ -320,13 +320,85 @@ if arquivos_mapeados['gest'] is not None and st.session_state['dados_gest'] is N
 # PROCESSAMENTO: CRIANÇAS (NOTA C2)
 if arquivos_mapeados['inf'] is not None and st.session_state['dados_inf'] is None:
     df = carregar_dados_esus(arquivos_mapeados['inf'])
-    df['[Status] 1ª Cons. (≤30 dias)'] = df['Idade na primeira consulta'].apply(lambda x: "🟢 Ok" if extrair_dias_vida(x) <= 30 else "🔴 Atrasada/Não feita")
-    df['[Status] Consultas (≥9)'] = df['Quantidade de consultas até 24 meses'].apply(lambda x: checar_qtd(x, 9))
-    df['[Status] Peso/Altura (≥9)'] = df['Quantidade de medições de peso/altura simultâneas até 24 meses'].apply(lambda x: checar_qtd(x, 9))
-    df['[Status] Visita ACS (≥2)'] = df['Quantidade de visitas domiciliares até os 24 meses de idade'].apply(lambda x: checar_qtd(x, 2))
-    df['[Status] Vacinas Básicas'] = df.apply(lambda r: "🟢 Ok" if pd.notna(r.get('Poliomielite')) and r.get('Poliomielite') != '-' else "🔴 Incompleta", axis=1)
     
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá, responsável por {r['Nome']}! Identificamos vacinas ou consultas de desenvolvimento infantil pendentes."), axis=1)
+    # --- FUNÇÃO AUXILIAR PARA BUSCAR COLUNAS POR PALAVRAS-CHAVE ---
+    def buscar_coluna(df, palavras_chave):
+        for col in df.columns:
+            if all(palavra.lower() in col.lower() for palavra in palavras_chave):
+                return col
+        return None
+        
+    # Mapeamento Dinâmico das Colunas do CSV Infantil
+    col_nasc = buscar_coluna(df, ['data', 'nascimento'])
+    col_idade_1_cons = buscar_coluna(df, ['idade', 'primeira', 'consulta'])
+    col_qtd_cons = buscar_coluna(df, ['quantidade', 'consultas'])
+    col_qtd_peso = buscar_coluna(df, ['peso/altura', 'simultâneas']) or buscar_coluna(df, ['quantidade', 'peso'])
+    
+    col_vd_qtd = buscar_coluna(df, ['quantidade', 'visitas', 'domiciliares', '24'])
+    col_vd1 = buscar_coluna(df, ['primeira', 'visita', 'domiciliar'])
+    col_vd2 = buscar_coluna(df, ['segunda', 'visita', 'domiciliar'])
+    
+    col_penta = buscar_coluna(df, ['difteria', 'hepatite'])
+    col_polio = buscar_coluna(df, ['polio'])
+    col_pneumo = buscar_coluna(df, ['pneumo'])
+    col_scr = buscar_coluna(df, ['sarampo', 'caxumba'])
+    
+    # --- APLICAÇÃO DAS REGRAS CLÍNICAS DA NOTA C2 ---
+    
+    # 1. 1ª Consulta Médica/Enfermagem (<= 30 dias de vida)
+    df['[Status] 1ª Cons. (≤30 dias)'] = df.apply(lambda r: "🟢 Ok" if col_idade_1_cons and extrair_dias_vida(r[col_idade_1_cons]) <= 30 else "🔴 Atrasada/Não feita", axis=1)
+    
+    # 2. Consultas de Rotina (>= 9)
+    df['[Status] Consultas (≥9)'] = df.apply(lambda r: checar_qtd(r[col_qtd_cons] if col_qtd_cons else 0, 9), axis=1)
+    
+    # 3. Peso/Altura Simultâneos (>= 9)
+    df['[Status] Peso/Altura (≥9)'] = df.apply(lambda r: checar_qtd(r[col_qtd_peso] if col_qtd_peso else 0, 9), axis=1)
+    
+    # 4. Visitas ACS (1ª <= 30 dias de vida | 2ª <= 6 meses/180 dias)
+    cols_datas = [c for c in [col_nasc, col_vd1, col_vd2] if c is not None]
+    df = limpar_datas(df, cols_datas)
+    
+    def checar_vds_inf(r):
+        # Se as datas específicas não constarem no CSV, usa a quantidade total como fallback
+        if not col_nasc or not col_vd1 or not col_vd2:
+            return checar_qtd(r[col_vd_qtd] if col_vd_qtd else 0, 2)
+            
+        nasc = r[col_nasc]
+        vd1 = r[col_vd1]
+        vd2 = r[col_vd2]
+        if pd.isna(nasc): return "🔴 Pendente"
+        
+        ok_vd1 = False
+        ok_vd2 = False
+        
+        if pd.notna(vd1):
+            dias_vd1 = (vd1 - nasc).days
+            if 0 <= dias_vd1 <= 30: ok_vd1 = True
+            
+        if pd.notna(vd2):
+            dias_vd2 = (vd2 - nasc).days
+            if 0 <= dias_vd2 <= 180: ok_vd2 = True
+            
+        if ok_vd1 and ok_vd2: return "🟢 Ok"
+        return "🔴 Pendente/Atrasada"
+        
+    df['[Status] Visita ACS (≥2)'] = df.apply(checar_vds_inf, axis=1)
+    
+    # 5. Vacinas Básicas Completas (Exige o fechamento do esquema)
+    def checar_vacinas(r):
+        # Procura por "D3" (3ª Dose) e "D2" (2ª Dose) ou "DU" (Dose Única) nas strings longas do e-SUS
+        ok_penta = col_penta and pd.notna(r[col_penta]) and 'D3' in str(r[col_penta]).upper()
+        ok_polio = col_polio and pd.notna(r[col_polio]) and 'D3' in str(r[col_polio]).upper()
+        ok_pneumo = col_pneumo and pd.notna(r[col_pneumo]) and 'D2' in str(r[col_pneumo]).upper()
+        ok_scr = col_scr and pd.notna(r[col_scr]) and ('D2' in str(r[col_scr]).upper() or 'DU' in str(r[col_scr]).upper())
+        
+        if ok_penta and ok_polio and ok_pneumo and ok_scr: return "🟢 Ok"
+        return "🔴 Incompleta"
+        
+    df['[Status] Vacinas Básicas'] = df.apply(checar_vacinas, axis=1)
+
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá, responsável por {r['Nome']}! A equipe de saúde avaliou a caderneta e identificamos vacinas ou consultas de puericultura pendentes. Podemos agendar?"), axis=1)
+    
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
