@@ -65,8 +65,20 @@ st.session_state['microarea_filtro'] = st.sidebar.text_input("Filtrar por Micro�
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📥 Importação de Dados")
-st.sidebar.info("Selecione **todos os arquivos CSV** do e-SUS de uma só vez e arraste aqui. O sistema vai organizá-los automaticamente nas abas!")
-uploaded_files = st.sidebar.file_uploader("Arquivos CSV", accept_multiple_files=True, type=['csv'])
+st.sidebar.info("Faça o upload do arquivo CSV correspondente em cada categoria abaixo para evitar erros de leitura.")
+
+# Cria um menu sanfona (expander) na barra lateral para os botões não ocuparem tanto espaço visual
+with st.sidebar.expander("📂 Selecionar Arquivos CSV", expanded=True):
+    arquivos_mapeados = {
+        'geral': st.file_uploader("🏥 População Geral", type=['csv'], key='up_geral'),
+        'gest':  st.file_uploader("🤰 Gestantes", type=['csv'], key='up_gest'),
+        'inf':   st.file_uploader("👶 Crianças (Puericultura)", type=['csv'], key='up_inf'),
+        'mul':   st.file_uploader("👩 Saúde da Mulher", type=['csv'], key='up_mul'),
+        'diab':  st.file_uploader("🩸 Diabetes", type=['csv'], key='up_diab'),
+        'hiper': st.file_uploader("🫀 Hipertensão", type=['csv'], key='up_hiper'),
+        'idoso': st.file_uploader("👵 Pessoa Idosa", type=['csv'], key='up_idoso'),
+        'cad':   st.file_uploader("📋 Cadastros Vinculados", type=['csv'], key='up_cad')
+    }
 
 # ================= FUNÇÕES AUXILIARES =================
 @st.cache_data(max_entries=10)
@@ -196,22 +208,6 @@ def interface_filtros_e_exportacao(df_view, colunas_status, chave, arquivo):
     df_filtrado = df_filtrado.drop(columns=['Tem Pendência?'])
     st.dataframe(df_filtrado, column_config={"Busca Ativa": st.column_config.LinkColumn("📲 Busca Ativa", display_text="📲 Contatar")}, hide_index=True, use_container_width=True)
     return df_filtrado
-
-
-# ================= CÉREBRO CENTRAL (PROCESSAMENTO AUTOMÁTICO EM LOTE) =================
-arquivos_mapeados = {k: None for k in indicadores_chaves}
-
-if uploaded_files:
-    for f in uploaded_files:
-        nome = f.name.upper()
-        if "GESTA" in nome or "PUERPERIO" in nome: arquivos_mapeados['gest'] = f
-        elif "DESENVOLVIMENTO" in nome or "INFAN" in nome: arquivos_mapeados['inf'] = f
-        elif "MULHER" in nome: arquivos_mapeados['mul'] = f
-        elif "DIABETES" in nome: arquivos_mapeados['diab'] = f
-        elif "HIPERTENSAO" in nome: arquivos_mapeados['hiper'] = f
-        elif "IDOSO" in nome: arquivos_mapeados['idoso'] = f
-        elif "VINCULADOS" in nome or "CADASTRO" in nome: arquivos_mapeados['cad'] = f
-        elif "GERAIS" in nome or "SAUDE" in nome: arquivos_mapeados['geral'] = f
 
 # PROCESSAMENTO: POPULAÇÃO GERAL (NOVA ABA)
 if arquivos_mapeados['geral'] is not None and st.session_state['dados_geral'] is None:
