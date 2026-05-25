@@ -5,6 +5,7 @@ from dateutil.relativedelta import relativedelta
 import urllib.parse
 import re
 import math
+import numpy as np
 
 # ================= CONFIGURAÇÃO INICIAL =================
 st.set_page_config(page_title="Gestor Proativo APS - Painel MS", layout="wide", page_icon="🏥")
@@ -68,7 +69,7 @@ st.sidebar.info("Selecione **todos os arquivos CSV** do e-SUS de uma só vez e a
 uploaded_files = st.sidebar.file_uploader("Arquivos CSV", accept_multiple_files=True, type=['csv'])
 
 # ================= FUNÇÕES AUXILIARES =================
-@st.cache_data
+@st.cache_data(max_entries=10)
 def carregar_dados_esus(uploaded_file):
     raw_bytes = uploaded_file.getvalue()
     try:
@@ -89,13 +90,9 @@ def carregar_dados_esus(uploaded_file):
     df = pd.read_csv(uploaded_file, sep=';', skiprows=header_idx, encoding=encoding)
     df = df.dropna(subset=['Nome'])
     
-    def extrair_anos(idade_str):
-        if pd.isna(idade_str): return 0
-        match = re.search(r'(\d+) ano', str(idade_str))
-        return int(match.group(1)) if match else 0
-    
+    # Extração otimizada (vetorizada) da Idade
     if 'Idade' in df.columns:
-        df['Idade_Anos'] = df['Idade'].apply(extrair_anos)
+        df['Idade_Anos'] = df['Idade'].astype(str).str.extract(r'(\d+) ano').fillna(0).astype(int)
     return df
 
 def limpar_datas(df, colunas):
@@ -134,8 +131,9 @@ def extrair_dias_vida(idade_str):
 def gerar_link_wpp_custom(telefone, mensagem):
     if pd.isna(telefone) or telefone == '-' or str(telefone).strip() == '': return None
     num = re.sub(r'\D', '', str(telefone))
-    # INTELIGÊNCIA: Adiciona DDD se o número foi digitado apenas com 8 ou 9 dígitos
-    if len(num) == 8 or len(num) == 9:
+    # Ajuste: Telefones fixos (8 dígitos) não recebem WPP. Apenas os de 9 dígitos recebem o DDD.
+    if len(num) == 8: return None
+    if len(num) == 9:
         num = DDD_PADRAO + num
     if len(num) < 10: return None
     return f"https://wa.me/55{num}?text={urllib.parse.quote(mensagem)}"
@@ -181,7 +179,7 @@ def interface_filtros_e_exportacao(df_view, colunas_status, chave, arquivo):
     if risco_filtro != "Todos" and 'Estratificação de risco cardiovascular' in df_filtrado.columns:
         df_filtrado = df_filtrado[df_filtrado['Estratificação de risco cardiovascular'].astype(str).str.contains(risco_filtro, na=False, case=False)]
 
-    # ORDENAÇÃO INTELIGENTE (COLOCA AS PRIORIDADES NO TOPO)
+    # ORDENAÇÃO INTELIGENTE
     if 'Estratificação de risco cardiovascular' in df_filtrado.columns:
         df_filtrado['Sort_Risco'] = df_filtrado['Estratificação de risco cardiovascular'].map({'Alto': 1, 'Moderado': 2, 'Baixo': 3}).fillna(4)
         df_filtrado = df_filtrado.sort_values(by=['Sort_Risco', 'Nome']).drop(columns=['Sort_Risco'])
@@ -201,7 +199,6 @@ def interface_filtros_e_exportacao(df_view, colunas_status, chave, arquivo):
 
 
 # ================= CÉREBRO CENTRAL (PROCESSAMENTO AUTOMÁTICO EM LOTE) =================
-# Mapeia os arquivos upados para as categorias corretas
 arquivos_mapeados = {k: None for k in indicadores_chaves}
 
 if uploaded_files:
@@ -216,7 +213,30 @@ if uploaded_files:
         elif "VINCULADOS" in nome or "CADASTRO" in nome: arquivos_mapeados['cad'] = f
         elif "GERAIS" in nome or "SAUDE" in nome: arquivos_mapeados['geral'] = f
 
-# PROCESSAMENTO: GESTANTES
+# PROCESSAMENTO: POPULAÇÃO GERAL (NOVA ABA)
+if arquivos_mapeados['geral'] is not None and st.session_state['dados_geral'] is None:
+    df = carregar_dados_esus(arquivos_mapeados['geral'])
+    colunas_data_geral = ['Data do último atendimento individual', 'Data da última visita domiciliar']
+    df = limpar_datas(df, colunas_data_geral)
+    
+    if 'Data do último atendimento individual' in df.columns:
+        df['[Status] Cons. (12m)'] = df['Data do último atendimento individual'].apply(lambda x: status_validade(x, 12))
+    else:
+        df['[Status] Cons. (12m)'] = "⚪ N/A"
+        
+    if 'Data da última visita domiciliar' in df.columns:
+        df['[Status] VD ACS (6m)'] = df['Data da última visita domiciliar'].apply(lambda x: status_validade(x, 6))
+    else:
+        df['[Status] VD ACS (6m)'] = "⚪ N/A"
+
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! Vimos que faz um tempo desde sua última avaliação na unidade de saúde. Podemos agendar um check-up?"), axis=1)
+    
+    cols_status = [c for c in df.columns if '[Status]' in c]
+    cols_view = ['Nome', 'Idade_Anos'] if 'Idade_Anos' in df.columns else ['Nome']
+    if 'Microárea' in df.columns: cols_view.append('Microárea')
+    st.session_state['dados_geral'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
+
+# PROCESSAMENTO: GESTANTES (NOTA C3)
 if arquivos_mapeados['gest'] is not None and st.session_state['dados_gest'] is None:
     df = carregar_dados_esus(arquivos_mapeados['gest'])
     df = limpar_datas(df, ['DPP'])
@@ -227,101 +247,98 @@ if arquivos_mapeados['gest'] is not None and st.session_state['dados_gest'] is N
     df['IG_Num'] = df['IG (DUM) (semanas)'].apply(lambda x: int(float(str(x).replace(',', '.'))) if pd.notna(x) and str(x).strip() not in ['-', ''] else 0)
     df['[Status] Estado'] = df['IG_Num'].apply(lambda x: "🤰 Gestante" if 0 < x <= 42 else ("👶 Puérpera" if x >= 43 else "📋 Pós-parto / Sem IG"))
     
-    df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no pré-natal', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
     df['[Status] Captação (≤12 sem)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos até 12 semanas no pré-natal', 0), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no pré-natal', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
     df['[Status] PA (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições de pressão arterial', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
     df['[Status] Peso/Altura (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições simultâneas de peso e altura', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-    df['[Status] VD ACS Gestação (≥3)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no pré-natal', r.get('Quantidade de visitas domiciliares', 0)), 3) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] VD ACS Gestação (≥3)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no pré-natal', 0), 3) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
     df['[Status] Vacina dTpa'] = df.apply(lambda r: "⚪ N/A" if r['[Status] Estado'] == "🤰 Gestante" and r['IG_Num'] < 20 else ("🟢 Ok" if pd.notna(r.get('dTpa')) and r.get('dTpa') != '-' else "🔴 Pendente"), axis=1)
-
-    df['[Status] Testes 1ºTri'] = df.apply(lambda r: "🟢 Ok" if (r['[Status] Estado'] == "🤰 Gestante" and str(r.get('Exame de HIV no primeiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Sífilis no primeiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Hepatite B no primeiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Hepatite C no primeiro trimestre', '')).strip().upper() == 'SIM') else ("⚪ N/A" if r['[Status] Estado'] != "🤰 Gestante" else "🔴 Pendente"), axis=1)
-    df['[Status] Testes 3ºTri'] = df.apply(lambda r: "🟢 Ok" if (r['[Status] Estado'] == "🤰 Gestante" and str(r.get('Exame de HIV no terceiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Sífilis no terceiro trimestre', '')).strip().upper() == 'SIM') else ("⚪ N/A" if r['[Status] Estado'] != "🤰 Gestante" else "🔴 Pendente"), axis=1)
-    
+    df['[Status] Testes 1ºTri'] = df.apply(lambda r: "🟢 Ok" if (str(r.get('Exame de HIV no primeiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Sífilis no primeiro trimestre', '')).strip().upper() == 'SIM') else "🔴 Pendente", axis=1)
+    df['[Status] Testes 3ºTri'] = df.apply(lambda r: "🟢 Ok" if (str(r.get('Exame de HIV no terceiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Sífilis no terceiro trimestre', '')).strip().upper() == 'SIM') else "🔴 Pendente", axis=1)
     df['[Status] Cons. Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
     df['[Status] VD Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
-    df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos odontológicos no pré-natal', r.get('Quantidade de atendimentos odontológicos', 0)), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos odontológicos', 0), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
 
-    def msg_gest(row):
-        p = []
-        if "🔴" in str(row.get('[Status] Captação (≤12 sem)', '')): p.append("primeira consulta até a 12ª semana")
-        if "🔴" in str(row.get('[Status] Consultas (≥7)', '')): p.append("consultas mínimas")
-        if "🔴" in str(row.get('[Status] Vacina dTpa', '')): p.append("vacina dTpa")
-        if not p: return f"Olá {row['Nome']}! Seus registros de pré-natal estão em dia!"
-        return f"Olá {row['Nome']}! Verificamos que precisamos atualizar: {', '.join(p)}. Podemos agendar?"
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! A equipe de saúde avaliou seu pré-natal/puerpério e notamos algumas atualizações necessárias. Podemos agendar?"), axis=1)
     
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], msg_gest(r)), axis=1)
-    cols_status = [c for c in df.columns if '[Status]' in c]
-    cols_view = ['Nome', 'IG (DUM) (semanas)']
+    cols_status = [c for c in df.columns if '[Status]' in c and c != '[Status] Estado']
+    cols_view = ['Nome', '[Status] Estado', 'IG (DUM) (semanas)']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
     if '🚨 Alerta DPP' in df.columns: cols_view.append('🚨 Alerta DPP')
     st.session_state['dados_gest'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
-# PROCESSAMENTO: CRIANÇAS
+# PROCESSAMENTO: CRIANÇAS (NOTA C2)
 if arquivos_mapeados['inf'] is not None and st.session_state['dados_inf'] is None:
     df = carregar_dados_esus(arquivos_mapeados['inf'])
     df['[Status] 1ª Cons. (≤30 dias)'] = df['Idade na primeira consulta'].apply(lambda x: "🟢 Ok" if extrair_dias_vida(x) <= 30 else "🔴 Atrasada/Não feita")
     df['[Status] Consultas (≥9)'] = df['Quantidade de consultas até 24 meses'].apply(lambda x: checar_qtd(x, 9))
     df['[Status] Peso/Altura (≥9)'] = df['Quantidade de medições de peso/altura simultâneas até 24 meses'].apply(lambda x: checar_qtd(x, 9))
     df['[Status] Visita ACS (≥2)'] = df['Quantidade de visitas domiciliares até os 24 meses de idade'].apply(lambda x: checar_qtd(x, 2))
-    df['[Status] Vacinas Básicas'] = df.apply(lambda r: "🟢 Ok" if pd.notna(r.get('Poliomielite')) and r.get('Poliomielite') != '-' else "🔴 Incompleta", axis=1) # Simplificado para performance
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], f"Olá, responsável por {r['Nome']}! Identificamos vacinas ou consultas infantis pendentes."), axis=1)
+    df['[Status] Vacinas Básicas'] = df.apply(lambda r: "🟢 Ok" if pd.notna(r.get('Poliomielite')) and r.get('Poliomielite') != '-' else "🔴 Incompleta", axis=1)
+    
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá, responsável por {r['Nome']}! Identificamos vacinas ou consultas de desenvolvimento infantil pendentes."), axis=1)
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
     st.session_state['dados_inf'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
-# PROCESSAMENTO: MULHER
+# PROCESSAMENTO: MULHER E PREVENÇÃO DE CÂNCER (NOTA C7)
 if arquivos_mapeados['mul'] is not None and st.session_state['dados_mul'] is None:
     df = carregar_dados_esus(arquivos_mapeados['mul'])
     df = limpar_datas(df, ['Exame de rastreamento de câncer de colo de útero data última avaliação', 'Exame de rastreamento de câncer de mama data Última avaliação', 'Data da última consulta de saúde sexual e reprodutiva'])
-    df['[Status] Preventivo (25-64a)'] = df.apply(lambda r: status_validade(r['Exame de rastreamento de câncer de colo de útero data última avaliação'], 36) if 25 <= r['Idade_Anos'] <= 64 else "⚪ N/A", axis=1)
-    df['[Status] Mamografia (50-69a)'] = df.apply(lambda r: status_validade(r.get('Exame de rastreamento de câncer de mama data Última avaliação'), 24) if 50 <= r['Idade_Anos'] <= 69 else "⚪ N/A", axis=1)
-    df['[Status] Vacina HPV (9-14a)'] = df.apply(lambda r: ("🟢 Ok" if str(r.get('HPV', '-')).strip() not in ['-', ''] and pd.notna(r.get('HPV')) else "🔴 Pendente") if 9 <= r['Idade_Anos'] <= 14 else "⚪ N/A", axis=1)
-    df['[Status] Saúde Reprod. (14-69a)'] = df.apply(lambda r: status_validade(r['Data da última consulta de saúde sexual e reprodutiva'], 12) if 14 <= r['Idade_Anos'] <= 69 else "⚪ N/A", axis=1)
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], f"Olá {r['Nome']}! A equipe de saúde solicita seu retorno para atualizar exames da mulher."), axis=1)
+    df['[Status] Preventivo (25-64a)'] = df.apply(lambda r: status_validade(r['Exame de rastreamento de câncer de colo de útero data última avaliação'], 36) if 25 <= r.get('Idade_Anos', 0) <= 64 else "⚪ N/A", axis=1)
+    df['[Status] Mamografia (50-69a)'] = df.apply(lambda r: status_validade(r.get('Exame de rastreamento de câncer de mama data Última avaliação'), 24) if 50 <= r.get('Idade_Anos', 0) <= 69 else "⚪ N/A", axis=1)
+    df['[Status] Vacina HPV (9-14a)'] = df.apply(lambda r: ("🟢 Ok" if str(r.get('HPV', '-')).strip() not in ['-', ''] and pd.notna(r.get('HPV')) else "🔴 Pendente") if 9 <= r.get('Idade_Anos', 0) <= 14 else "⚪ N/A", axis=1)
+    df['[Status] Saúde Reprod. (14-69a)'] = df.apply(lambda r: status_validade(r['Data da última consulta de saúde sexual e reprodutiva'], 12) if 14 <= r.get('Idade_Anos', 0) <= 69 else "⚪ N/A", axis=1)
+    
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! A equipe de saúde solicita seu retorno para atualizar exames preventivos."), axis=1)
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
     st.session_state['dados_mul'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
-# PROCESSAMENTO: DIABETES
+# PROCESSAMENTO: DIABETES (NOTA C4)
 if arquivos_mapeados['diab'] is not None and st.session_state['dados_diab'] is None:
     df = carregar_dados_esus(arquivos_mapeados['diab'])
-    df = limpar_datas(df, ['Data da última avaliação de hemoglobina glicada', 'Data da avaliação dos pés', 'Data da ultima medição de peso e altura'])
-    df['[Status] HbA1c (12m)'] = df['Data da última avaliação de hemoglobina glicada'].apply(lambda x: status_validade(x, 12))
-    df['[Status] Pé Diabético (12m)'] = df['Data da avaliação dos pés'].apply(lambda x: status_validade(x, 12)) 
-    df['[Status] Peso/Altura (12m)'] = df['Data da ultima medição de peso e altura'].apply(lambda x: status_validade(x, 12))
-    df['[Status] Visitas ACS (≥2)'] = df['Quantidade de visitas domiciliares'].apply(lambda x: checar_qtd(x, 2))
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], f"Olá {r['Nome']}! Verificamos pendências no acompanhamento do seu diabetes."), axis=1)
+    df = limpar_datas(df, ['Data do último atendimento individual', 'Data da última medição de pressão arterial', 'Data da ultima medição de peso e altura', 'Data da última avaliação de hemoglobina glicada', 'Data da avaliação dos pés'])
+    df['[Status] Consulta (6m)'] = df.get('Data do último atendimento individual', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 6))
+    df['[Status] PA (6m)'] = df.get('Data da última medição de pressão arterial', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 6))
+    df['[Status] Peso/Altura (12m)'] = df.get('Data da ultima medição de peso e altura', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12))
+    df['[Status] VD ACS (12m)'] = df.get('Quantidade de visitas domiciliares', pd.Series([0]*len(df))).apply(lambda x: checar_qtd(x, 2))
+    df['[Status] HbA1c (12m)'] = df.get('Data da última avaliação de hemoglobina glicada', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12))
+    df['[Status] Pé Diabético (12m)'] = df.get('Data da avaliação dos pés', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12)) 
+    
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! Verificamos pendências de consultas e exames do seu acompanhamento de saúde."), axis=1)
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
-    if 'Estratificação de risco cardiovascular' in df.columns: cols_view.append('Estratificação de risco cardiovascular')
     st.session_state['dados_diab'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
-# PROCESSAMENTO: HIPERTENSÃO
+# PROCESSAMENTO: HIPERTENSÃO (NOTA C5)
 if arquivos_mapeados['hiper'] is not None and st.session_state['dados_hiper'] is None:
     df = carregar_dados_esus(arquivos_mapeados['hiper'])
-    df = limpar_datas(df, ['Data da última medição de pressão arterial', 'Data da ultima medição de peso e altura'])
-    df['[Status] Consulta e PA (6m)'] = df['Data da última medição de pressão arterial'].apply(lambda x: status_validade(x, 6))
-    df['[Status] Peso/Altura (12m)'] = df['Data da ultima medição de peso e altura'].apply(lambda x: status_validade(x, 12))
-    df['[Status] Visitas ACS'] = df['Quantidade de visitas domiciliares'].apply(lambda x: checar_qtd(x, 2))
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], f"Olá {r['Nome']}! Precisamos medir sua pressão e atualizar seu cadastro clínico."), axis=1)
+    df = limpar_datas(df, ['Data do último atendimento individual', 'Data da última medição de pressão arterial', 'Data da ultima medição de peso e altura'])
+    df['[Status] Consulta (6m)'] = df.get('Data do último atendimento individual', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 6))
+    df['[Status] PA (6m)'] = df.get('Data da última medição de pressão arterial', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 6))
+    df['[Status] Peso/Altura (12m)'] = df.get('Data da ultima medição de peso e altura', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12))
+    df['[Status] VD ACS (12m)'] = df.get('Quantidade de visitas domiciliares', pd.Series([0]*len(df))).apply(lambda x: checar_qtd(x, 2))
+    
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! Precisamos medir sua pressão e atualizar seu cadastro clínico."), axis=1)
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
-    if 'Estratificação de risco cardiovascular' in df.columns: cols_view.append('Estratificação de risco cardiovascular')
     st.session_state['dados_hiper'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
-# PROCESSAMENTO: IDOSO
+# PROCESSAMENTO: IDOSO (NOTA C6)
 if arquivos_mapeados['idoso'] is not None and st.session_state['dados_idoso'] is None:
     df = carregar_dados_esus(arquivos_mapeados['idoso'])
-    df = limpar_datas(df, ['IVCF-20 Data do registro'])
-    df['[Status] Avaliação AMPI (12m)'] = df['IVCF-20 Data do registro'].apply(lambda x: status_validade(x, 12))
+    df = limpar_datas(df, ['Data do último atendimento individual'])
+    df['[Status] Consulta (12m)'] = df.get('Data do último atendimento individual', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12))
+    df['[Status] Peso/Altura (12m)'] = df.get('Registros de peso e altura simultâneos nos últimos 12 meses', pd.Series([0]*len(df))).apply(lambda x: checar_qtd(x, 1))
+    df['[Status] VD ACS (12m)'] = df.get('Quantidade de visitas domiciliares', pd.Series([0]*len(df))).apply(lambda x: checar_qtd(x, 2))
     df['[Status] Influenza (12m)'] = df.apply(lambda r: "🟢 Ok" if str(r.get('Influenza (últimos 12 meses)', '-')).strip().upper() == 'SIM' else "🔴 Faltante", axis=1)
-    df['[Status] Peso/Altura (≥2)'] = df['Registros de peso e altura simultâneos nos últimos 12 meses'].apply(lambda x: checar_qtd(x, 2))
-    df['[Status] Visitas ACS (≥2)'] = df['Quantidade de visitas domiciliares'].apply(lambda x: checar_qtd(x, 2))
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r['Telefone celular'], f"Olá {r['Nome']}! Temos consultas e exames preventivos pendentes para agendar."), axis=1)
+    
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! Temos consultas preventivas pendentes para agendar para você."), axis=1)
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
@@ -341,6 +358,7 @@ if arquivos_mapeados['cad'] is not None and st.session_state['dados_cad'] is Non
     cols_view.extend(['CPF/CNS', 'Telefone celular'])
     st.session_state['dados_cad'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
+
 # ================= INTERFACE EM ABAS =================
 tabs = st.tabs([
     "📊 Dashboard Geral",
@@ -350,7 +368,8 @@ tabs = st.tabs([
     "🩸 Diabetes", 
     "🫀 Hipertensão", 
     "👵 Idoso", 
-    "📋 Cadastros"
+    "📋 Cadastros",
+    "🏥 População Geral"
 ])
 
 # ----------------- 0. DASHBOARD GERAL -----------------
@@ -363,7 +382,6 @@ with tabs[0]:
     
     if st.session_state['dados_gest'] is not None:
         df_g = st.session_state['dados_gest']
-        # TRAVA DE SEGURANÇA: Só tenta contar se a coluna existir no CSV exportado pelo e-SUS
         if '🚨 Alerta DPP' in df_g.columns:
             n_partos = len(df_g[df_g['🚨 Alerta DPP'].astype(str).str.contains('Iminente', na=False)])
             if n_partos > 0:
@@ -374,7 +392,6 @@ with tabs[0]:
         if st.session_state[f'dados_{ind}'] is not None:
             df_c = st.session_state[f'dados_{ind}']
             if 'Estratificação de risco cardiovascular' in df_c.columns:
-                # Conta crônicos de alto risco que possuem pendência
                 cols_stat = [c for c in df_c.columns if '[Status]' in c]
                 df_c['Tem Pendência'] = df_c[cols_stat].apply(lambda r: True if any('🔴' in str(v) for v in r) else False, axis=1)
                 n_altorisco = len(df_c[(df_c['Estratificação de risco cardiovascular'].astype(str).str.contains('Alto', na=False, case=False)) & (df_c['Tem Pendência'] == True)])
@@ -393,54 +410,75 @@ with tabs[0]:
         </div>
         """, unsafe_allow_html=True)
     else:
+        # AQUI FOI CORRIGIDO O KEY ERROR USANDO f'dados_{k}'
         if any(st.session_state[f'dados_{k}'] is not None for k in indicadores_chaves):
             st.success("✅ Nenhum alerta clínico crítico identificado nas planilhas no momento.")
 
 
-    # DICIONÁRIO DO DASHBOARD (MÉTRICAS)
+    # DICIONÁRIO DO DASHBOARD (MÉTRICAS ATUALIZADAS C2 AO C7)
     estrutura_dashboard = {
         'gest': {
-            'titulo': "🤰 C3: Gestantes e Puérperas",
+            'titulo': "🤰 C3: Cuidado na Gestação e Puerpério",
             'metricas': [
-                ('[Status] Captação (≤12 sem)', 'Captação Precoce', 10, '1ª consulta de pré-natal realizada até a 12ª semana de gestação.'),
-                ('[Status] Consultas (≥7)', 'Consultas Pré-natal', 9, 'Realização de no mínimo 7 consultas durante a gestação.'),
-                ('[Status] Vacina dTpa', 'Vacinação dTpa', 9, 'Administração de 1 dose de vacina dTpa a partir da 20ª semana.'),
+                ('[Status] Captação (≤12 sem)', '1ª Consulta (≤12 sem)', 10, '1ª consulta pré-natal até a 12ª semana.'),
+                ('[Status] Consultas (≥7)', 'Consultas (≥7)', 9, 'Pelo menos 07 consultas durante a gestação.'),
+                ('[Status] PA (≥7)', 'Aferição de PA (≥7)', 9, 'Pelo menos 07 registros de aferição de pressão.'),
+                ('[Status] Peso/Altura (≥7)', 'Peso e Altura (≥7)', 9, 'Pelo menos 07 registros simultâneos de peso e altura.'),
+                ('[Status] VD ACS Gestação (≥3)', 'Visitas ACS Gestação (≥3)', 9, 'Pelo menos 03 VD após a primeira consulta.'),
+                ('[Status] Vacina dTpa', 'Vacina dTpa (≥20 sem)', 9, 'Vacina dTpa registrada a partir da 20ª semana.'),
+                ('[Status] Testes 1ºTri', 'Testes 1º Trimestre', 9, 'Sífilis, HIV, Hepatites B e C no 1º trimestre.'),
+                ('[Status] Testes 3ºTri', 'Testes 3º Trimestre', 9, 'Sífilis e HIV no 3º trimestre.'),
+                ('[Status] Cons. Puerpério', 'Consulta Puerpério', 9, 'Pelo menos 01 consulta no puerpério.'),
+                ('[Status] VD Puerpério', 'Visita ACS Puerpério', 9, 'Pelo menos 01 VD no puerpério.'),
+                ('[Status] Odonto Gestação', 'Avaliação Odontológica', 9, 'Pelo menos 01 atividade de saúde bucal na gestação.')
             ]
         },
         'inf': {
             'titulo': "👶 C2: Desenvolvimento Infantil",
             'metricas': [
-                ('[Status] 1ª Cons. (≤30 dias)', '1ª Consulta até 30 dias', 20, 'Consulta de rotina realizada nos primeiros 30 dias de vida.'),
-                ('[Status] Consultas (≥9)', 'Consultas de Rotina', 20, 'Pelo menos 9 consultas de puericultura até os 24 meses.'),
-                ('[Status] Vacinas Básicas', 'Esquema Vacinal', 20, 'Esquema completo (Penta, Pólio, Tríplice Viral e Pneumocócica).')
+                ('[Status] 1ª Cons. (≤30 dias)', '1ª Consulta (≤30 dias)', 20, '1ª consulta médica ou enf. até 30 dias de vida.'),
+                ('[Status] Consultas (≥9)', 'Consultas de Rotina (≥9)', 20, 'Pelo menos 09 consultas até dois anos de vida.'),
+                ('[Status] Peso/Altura (≥9)', 'Peso e Altura (≥9)', 20, 'Pelo menos 09 registros de peso e altura.'),
+                ('[Status] Visita ACS (≥2)', 'Visita ACS (≥2)', 20, '2 visitas ACS (1ª até 30d, 2ª até 6 meses).'),
+                ('[Status] Vacinas Básicas', 'Esquema Vacinal', 20, 'Vacinas: dTpa/Penta/VIP, SCR, VPC.')
             ]
         },
         'mul': {
-            'titulo': "👩 C7: Saúde da Mulher",
+            'titulo': "👩 C7: Prevenção de Câncer e Saúde Mulher",
             'metricas': [
-                ('[Status] Preventivo (25-64a)', 'Citopatológico', 30, '1 exame preventivo a cada 36 meses (Mulheres 25 a 64 anos).'),
-                ('[Status] Mamografia (50-69a)', 'Mamografia', 20, '1 mamografia de rastreio a cada 24 meses (Mulheres 50 a 69 anos).'),
+                ('[Status] Preventivo (25-64a)', 'Citopatológico (25-64a)', 20, '1 exame preventivo a cada 36 meses.'),
+                ('[Status] Mamografia (50-69a)', 'Mamografia (50-69a)', 20, '1 mamografia de rastreio a cada 24 meses.'),
+                ('[Status] Vacina HPV (9-14a)', 'Vacina HPV (9-14a)', 30, '01 dose da vacina HPV para 09 a 14 anos.'),
+                ('[Status] Saúde Reprod. (14-69a)', 'Saúde Reprodutiva', 30, 'Atendimento de saúde sexual e reprodutiva nos últimos 12m.')
             ]
         },
         'diab': {
-            'titulo': "🩸 C4: Diabetes Mellitus",
+            'titulo': "🩸 C4: Pessoa com Diabetes",
             'metricas': [
-                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada', 20, '1 exame de Hemoglobina Glicada nos últimos 12 meses.'),
-                ('[Status] Pé Diabético (12m)', 'Rastreio do Pé Diabético', 20, '1 avaliação clínica do pé diabético nos últimos 12 meses.'),
+                ('[Status] Consulta (6m)', 'Consulta Semestral', 20, 'Pelo menos 01 consulta nos últimos 6 meses.'),
+                ('[Status] PA (6m)', 'Aferição de PA (6m)', 15, 'Pelo menos 01 aferição de PA nos últimos 6 meses.'),
+                ('[Status] Peso/Altura (12m)', 'Peso e Altura (12m)', 15, 'Pelo menos 01 registro de peso e altura em 12 meses.'),
+                ('[Status] VD ACS (12m)', 'Visitas ACS (≥2 em 12m)', 20, 'Pelo menos 02 VD com intervalo mínimo de 30 dias.'),
+                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada', 15, '1 exame de HbA1c nos últimos 12 meses.'),
+                ('[Status] Pé Diabético (12m)', 'Avaliação dos Pés', 15, '1 avaliação dos pés nos últimos 12 meses.')
             ]
         },
         'hiper': {
-            'titulo': "🫀 C5: Hipertensão Arterial",
+            'titulo': "🫀 C5: Pessoa com Hipertensão",
             'metricas': [
-                ('[Status] Consulta e PA (6m)', 'Consulta e PA Semestral', 50, '1 consulta clínica e aferição da PA nos últimos 6 meses.'),
-                ('[Status] Visitas ACS', 'Visitas ACS', 25, 'Pelo menos 2 visitas do ACS nos últimos 12 meses.')
+                ('[Status] Consulta (6m)', 'Consulta Semestral', 25, 'Pelo menos 01 consulta nos últimos 6 meses.'),
+                ('[Status] PA (6m)', 'Aferição de PA (6m)', 25, 'Pelo menos 01 aferição de PA nos últimos 6 meses.'),
+                ('[Status] Peso/Altura (12m)', 'Peso e Altura (12m)', 25, 'Pelo menos 01 registro de peso e altura em 12 meses.'),
+                ('[Status] VD ACS (12m)', 'Visitas ACS (≥2 em 12m)', 25, 'Pelo menos 02 VD com intervalo mínimo de 30 dias.')
             ]
         },
         'idoso': {
             'titulo': "👵 C6: Pessoa Idosa",
             'metricas': [
-                ('[Status] Avaliação AMPI (12m)', 'Avaliação AMPI', 30, '1 avaliação multidimensional (AMPI/IVCF-20) nos últimos 12 meses.'),
-                ('[Status] Influenza (12m)', 'Vacina Influenza', 30, 'Registro de vacinação anual contra a Gripe (Influenza).'),
+                ('[Status] Consulta (12m)', 'Consulta Anual', 25, 'Pelo menos 01 consulta nos últimos 12 meses.'),
+                ('[Status] Peso/Altura (12m)', 'Peso e Altura (12m)', 25, 'Pelo menos 01 registro de peso e altura em 12 meses.'),
+                ('[Status] VD ACS (12m)', 'Visitas ACS (≥2 em 12m)', 25, 'Pelo menos 02 VD com intervalo mínimo de 30 dias.'),
+                ('[Status] Influenza (12m)', 'Vacina Influenza (12m)', 25, '01 dose da vacina contra influenza nos últimos 12 meses.')
             ]
         }
     }
@@ -474,10 +512,9 @@ with tabs[0]:
                                 faltam_meta = max(0, meta_pacientes - em_dia)
                                 texto_meta = "🎯 **Meta Atingida!**" if perc_cobertura >= meta_pct else f"📉 Faltam **{faltam_meta}** pacientes para atingir a meta ótima"
                                 
-                                st.markdown(f"**{label}**")
+                                st.markdown(f"**{label}** (Peso na nota: {peso}pts)")
                                 st.caption(f"🎯 *Regra:* {regra}")
                                 
-                                # Barra de progresso visual simulada com HTML para ter cor dinâmica
                                 cor_barra = "#2E8B57" if perc_cobertura >= 0.75 else ("#DAA520" if perc_cobertura >= 0.50 else "#DC143C")
                                 st.markdown(f"""
                                 <div style="width: 100%; background-color: #e0e0e0; border-radius: 5px;">
@@ -527,3 +564,9 @@ with tabs[7]:
     st.header("📋 Auditoria de Cadastros (Qualidade de Dados)")
     cols = [c for c in st.session_state['dados_cad'].columns if '[Status]' in c] if st.session_state['dados_cad'] is not None else []
     interface_filtros_e_exportacao(st.session_state['dados_cad'], cols, 'cad', 'Cadastros')
+
+with tabs[8]:
+    st.header("🏥 Condições Clínicas Gerais (População)")
+    st.markdown("Monitoramento de últimas consultas e visitas domiciliares de rotina para todos os cidadãos.")
+    cols = [c for c in st.session_state['dados_geral'].columns if '[Status]' in c] if st.session_state['dados_geral'] is not None else []
+    interface_filtros_e_exportacao(st.session_state['dados_geral'], cols, 'geral', 'Populacao_Geral')
