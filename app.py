@@ -240,6 +240,7 @@ if arquivos_mapeados['geral'] is not None and st.session_state['dados_geral'] is
 if arquivos_mapeados['gest'] is not None and st.session_state['dados_gest'] is None:
     df = carregar_dados_esus(arquivos_mapeados['gest'])
     df = limpar_datas(df, ['DPP'])
+    
     if 'DPP' in df.columns:
         df['Dias_Parto'] = (df['DPP'] - datetime.today()).dt.days
         df['🚨 Alerta DPP'] = df['Dias_Parto'].apply(lambda x: "⚠️ Iminente (≤30d)" if pd.notna(x) and 0 <= x <= 30 else ("⚪ N/A"))
@@ -247,26 +248,75 @@ if arquivos_mapeados['gest'] is not None and st.session_state['dados_gest'] is N
     df['IG_Num'] = df['IG (DUM) (semanas)'].apply(lambda x: int(float(str(x).replace(',', '.'))) if pd.notna(x) and str(x).strip() not in ['-', ''] else 0)
     df['[Status] Estado'] = df['IG_Num'].apply(lambda x: "🤰 Gestante" if 0 < x <= 42 else ("👶 Puérpera" if x >= 43 else "📋 Pós-parto / Sem IG"))
     
-    df['[Status] Captação (≤12 sem)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos até 12 semanas no pré-natal', 0), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-    df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no pré-natal', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-    df['[Status] PA (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições de pressão arterial', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-    df['[Status] Peso/Altura (≥7)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de medições simultâneas de peso e altura', 0), 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-    df['[Status] VD ACS Gestação (≥3)'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no pré-natal', 0), 3) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
-    df['[Status] Vacina dTpa'] = df.apply(lambda r: "⚪ N/A" if r['[Status] Estado'] == "🤰 Gestante" and r['IG_Num'] < 20 else ("🟢 Ok" if pd.notna(r.get('dTpa')) and r.get('dTpa') != '-' else "🔴 Pendente"), axis=1)
-    df['[Status] Testes 1ºTri'] = df.apply(lambda r: "🟢 Ok" if (str(r.get('Exame de HIV no primeiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Sífilis no primeiro trimestre', '')).strip().upper() == 'SIM') else "🔴 Pendente", axis=1)
-    df['[Status] Testes 3ºTri'] = df.apply(lambda r: "🟢 Ok" if (str(r.get('Exame de HIV no terceiro trimestre', '')).strip().upper() == 'SIM' and str(r.get('Exame de Sífilis no terceiro trimestre', '')).strip().upper() == 'SIM') else "🔴 Pendente", axis=1)
-    df['[Status] Cons. Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
-    df['[Status] VD Puerpério'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de visitas domiciliares no puerpério', 0), 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
-    df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r.get('Quantidade de atendimentos odontológicos', 0), 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    # --- FUNÇÃO AUXILIAR PARA BUSCAR COLUNAS POR PALAVRAS-CHAVE ---
+    # Isso evita que o app quebre se o e-SUS mudar um acento ou espaço no nome da coluna do CSV
+    def buscar_coluna(df, palavras_chave):
+        for col in df.columns:
+            if all(palavra.lower() in col.lower() for palavra in palavras_chave):
+                return col
+        return None
 
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! A equipe de saúde avaliou seu pré-natal/puerpério e notamos algumas atualizações necessárias. Podemos agendar?"), axis=1)
+    # Mapeamento Dinâmico das Colunas do CSV
+    col_captacao = buscar_coluna(df, ['12', 'semanas']) or buscar_coluna(df, ['captação'])
+    col_cons_pre = buscar_coluna(df, ['consultas', 'pré-natal']) or buscar_coluna(df, ['atendimentos no pré-natal'])
+    col_pa = buscar_coluna(df, ['pressão', 'arterial'])
+    col_peso = buscar_coluna(df, ['peso', 'altura'])
+    col_vd_gest = buscar_coluna(df, ['visitas', 'domiciliares', 'pré-natal']) or buscar_coluna(df, ['visitas', 'gestação'])
+    col_vd_puerp = buscar_coluna(df, ['visitas', 'puerpério'])
+    col_cons_puerp = buscar_coluna(df, ['atendimentos', 'puerpério']) or buscar_coluna(df, ['consulta', 'puerpério'])
+    col_odonto = buscar_coluna(df, ['odontológico'])
+    col_dtpa = buscar_coluna(df, ['dtpa'])
+
+    # Testes 1º Tri
+    col_hiv_1 = buscar_coluna(df, ['hiv', 'primeiro'])
+    col_sif_1 = buscar_coluna(df, ['sífilis', 'primeiro']) or buscar_coluna(df, ['sifilis', 'primeiro'])
+    col_hepb_1 = buscar_coluna(df, ['hepatite b', 'primeiro'])
+    col_hepc_1 = buscar_coluna(df, ['hepatite c', 'primeiro'])
+    
+    # Testes 3º Tri
+    col_hiv_3 = buscar_coluna(df, ['hiv', 'terceiro'])
+    col_sif_3 = buscar_coluna(df, ['sífilis', 'terceiro']) or buscar_coluna(df, ['sifilis', 'terceiro'])
+
+    # --- APLICAÇÃO DAS REGRAS CLÍNICAS DA NOTA C3 ---
+    df['[Status] Captação (≤12 sem)'] = df.apply(lambda r: checar_qtd(r[col_captacao] if col_captacao else 0, 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] Consultas (≥7)'] = df.apply(lambda r: checar_qtd(r[col_cons_pre] if col_cons_pre else 0, 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] PA (≥7)'] = df.apply(lambda r: checar_qtd(r[col_pa] if col_pa else 0, 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] Peso/Altura (≥7)'] = df.apply(lambda r: checar_qtd(r[col_peso] if col_peso else 0, 7) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    df['[Status] VD ACS Gestação (≥3)'] = df.apply(lambda r: checar_qtd(r[col_vd_gest] if col_vd_gest else 0, 3) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+    
+    # Regra da dTpa: Só cobra se a IG for >= 20 semanas
+    df['[Status] Vacina dTpa'] = df.apply(lambda r: "⚪ N/A" if r['[Status] Estado'] == "🤰 Gestante" and r['IG_Num'] < 20 else ("🟢 Ok" if col_dtpa and pd.notna(r[col_dtpa]) and str(r[col_dtpa]).strip() not in ['-', ''] else "🔴 Pendente"), axis=1)
+    
+    # Validação rigorosa dos 4 exames do 1º Trimestre
+    def checar_testes_1tri(r):
+        if r['[Status] Estado'] != "🤰 Gestante": return "⚪ N/A"
+        exames_ok = True
+        for col in [col_hiv_1, col_sif_1, col_hepb_1, col_hepc_1]:
+            if not col or str(r[col]).strip().upper() != 'SIM': exames_ok = False
+        return "🟢 Ok" if exames_ok else "🔴 Pendente"
+    df['[Status] Testes 1ºTri'] = df.apply(checar_testes_1tri, axis=1)
+    
+    # Validação dos 2 exames do 3º Trimestre
+    def checar_testes_3tri(r):
+        if r['[Status] Estado'] != "🤰 Gestante": return "⚪ N/A"
+        exames_ok = True
+        for col in [col_hiv_3, col_sif_3]:
+            if not col or str(r[col]).strip().upper() != 'SIM': exames_ok = False
+        return "🟢 Ok" if exames_ok else "🔴 Pendente"
+    df['[Status] Testes 3ºTri'] = df.apply(checar_testes_3tri, axis=1)
+    
+    df['[Status] Cons. Puerpério'] = df.apply(lambda r: checar_qtd(r[col_cons_puerp] if col_cons_puerp else 0, 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
+    df['[Status] VD Puerpério'] = df.apply(lambda r: checar_qtd(r[col_vd_puerp] if col_vd_puerp else 0, 1) if r['[Status] Estado'] == "👶 Puérpera" else "⚪ N/A", axis=1)
+    df['[Status] Odonto Gestação'] = df.apply(lambda r: checar_qtd(r[col_odonto] if col_odonto else 0, 1) if r['[Status] Estado'] == "🤰 Gestante" else "⚪ N/A", axis=1)
+
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! A equipe de saúde avaliou seu prontuário e notamos atualizações necessárias no seu acompanhamento. Podemos agendar?"), axis=1)
     
     cols_status = [c for c in df.columns if '[Status]' in c and c != '[Status] Estado']
     cols_view = ['Nome', '[Status] Estado', 'IG (DUM) (semanas)']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
     if '🚨 Alerta DPP' in df.columns: cols_view.append('🚨 Alerta DPP')
     st.session_state['dados_gest'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
-
+    
 # PROCESSAMENTO: CRIANÇAS (NOTA C2)
 if arquivos_mapeados['inf'] is not None and st.session_state['dados_inf'] is None:
     df = carregar_dados_esus(arquivos_mapeados['inf'])
