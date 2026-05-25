@@ -422,18 +422,98 @@ if arquivos_mapeados['mul'] is not None and st.session_state['dados_mul'] is Non
 # PROCESSAMENTO: DIABETES (NOTA C4)
 if arquivos_mapeados['diab'] is not None and st.session_state['dados_diab'] is None:
     df = carregar_dados_esus(arquivos_mapeados['diab'])
-    df = limpar_datas(df, ['Data do último atendimento individual', 'Data da última medição de pressão arterial', 'Data da ultima medição de peso e altura', 'Data da última avaliação de hemoglobina glicada', 'Data da avaliação dos pés'])
-    df['[Status] Consulta (6m)'] = df.get('Data do último atendimento individual', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 6))
-    df['[Status] PA (6m)'] = df.get('Data da última medição de pressão arterial', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 6))
-    df['[Status] Peso/Altura (12m)'] = df.get('Data da ultima medição de peso e altura', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12))
-    df['[Status] VD ACS (12m)'] = df.get('Quantidade de visitas domiciliares', pd.Series([0]*len(df))).apply(lambda x: checar_qtd(x, 2))
-    df['[Status] HbA1c (12m)'] = df.get('Data da última avaliação de hemoglobina glicada', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12))
-    df['[Status] Pé Diabético (12m)'] = df.get('Data da avaliação dos pés', pd.Series([pd.NA]*len(df))).apply(lambda x: status_validade(x, 12)) 
     
-    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! Verificamos pendências de consultas e exames do seu acompanhamento de saúde."), axis=1)
+    # --- FUNÇÃO AUXILIAR PARA BUSCAR COLUNAS POR PALAVRAS-CHAVE ---
+    def buscar_coluna(df, palavras_chave):
+        for col in df.columns:
+            if all(palavra.lower() in col.lower() for palavra in palavras_chave):
+                return col
+        return None
+        
+    # Mapeamento Dinâmico das Colunas do CSV Diabetes
+    col_consulta = buscar_coluna(df, ['data', 'última', 'consulta']) or buscar_coluna(df, ['atendimento', 'individual'])
+    col_pa = buscar_coluna(df, ['data', 'pressão', 'arterial'])
+    col_peso = buscar_coluna(df, ['data', 'peso', 'altura'])
+    col_pes = buscar_coluna(df, ['data', 'avaliação', 'pés'])
+    
+    col_hba1c_av = buscar_coluna(df, ['avaliação', 'hemoglobina', 'glicada'])
+    col_hba1c_sol = buscar_coluna(df, ['solicitação', 'hemoglobina', 'glicada'])
+    
+    col_vd_str = buscar_coluna(df, ['últimas', 'visitas', 'domiciliares'])
+    col_vd_qtd = buscar_coluna(df, ['quantidade', 'visitas', 'domiciliares'])
+
+    df = limpar_datas(df, [col_consulta, col_pa, col_peso, col_pes, col_hba1c_av, col_hba1c_sol])
+
+    # --- APLICAÇÃO DAS REGRAS CLÍNICAS DA NOTA C4 ---
+    
+    # (A) Consulta em 6 meses (20 pontos)
+    df['[Status] Consulta (6m)'] = df[col_consulta].apply(lambda x: status_validade(x, 6)) if col_consulta else "⚪ N/A"
+    
+    # (B) Pressão Arterial em 6 meses (15 pontos)
+    df['[Status] PA (6m)'] = df[col_pa].apply(lambda x: status_validade(x, 6)) if col_pa else "⚪ N/A"
+    
+    # (C) Peso e Altura em 12 meses (15 pontos)
+    df['[Status] Peso/Altura (12m)'] = df[col_peso].apply(lambda x: status_validade(x, 12)) if col_peso else "⚪ N/A"
+    
+    # (F) Avaliação dos pés em 12 meses (15 pontos)
+    df['[Status] Pé Diabético (12m)'] = df[col_pes].apply(lambda x: status_validade(x, 12)) if col_pes else "⚪ N/A"
+
+    # (E) Hemoglobina Glicada (solicitada OU avaliada) em 12 meses (15 pontos)
+    def checar_hba1c(r):
+        dt_av = r[col_hba1c_av] if col_hba1c_av else pd.NaT
+        dt_sol = r[col_hba1c_sol] if col_hba1c_sol else pd.NaT
+        
+        # Pega a data mais recente entre avaliação ou solicitação
+        datas_validas = [d for d in [dt_av, dt_sol] if pd.notna(d)]
+        if not datas_validas: return "🔴 Faltante"
+        data_mais_recente = max(datas_validas)
+        return status_validade(data_mais_recente, 12)
+        
+    df['[Status] HbA1c (12m)'] = df.apply(checar_hba1c, axis=1)
+
+    # (D) Duas visitas ACS em 12 meses com intervalo >= 30 dias (20 pontos)
+    def checar_vds_diabetes(r):
+        # A coluna traz dados como "08/07/2025 e 25/08/2025"
+        if not col_vd_str or pd.isna(r[col_vd_str]) or r[col_vd_str] == '-':
+            # Fallback para quantidade caso a coluna de string não exista
+            return checar_qtd(r[col_vd_qtd] if col_vd_qtd else 0, 2)
+            
+        texto_vds = str(r[col_vd_str]).lower().replace(' e ', '|').replace(' e', '|').replace('e ', '|')
+        partes = texto_vds.split('|')
+        
+        datas = []
+        for p in partes:
+            try:
+                datas.append(datetime.strptime(p.strip(), '%d/%m/%Y'))
+            except:
+                pass
+                
+        if len(datas) < 2: return "🔴 Incompleta (<2 VDs)"
+        
+        datas.sort() # Ordena do mais antigo para o mais novo
+        hoje = datetime.today()
+        um_ano_atras = hoje - relativedelta(months=12)
+        
+        # Pega as duas visitas mais recentes
+        vd1 = datas[-2]
+        vd2 = datas[-1]
+        
+        # Ambas precisam estar dentro dos últimos 12 meses
+        if vd1 < um_ano_atras: return "🔴 Vencida (>12m)"
+        
+        # Checa o intervalo de 30 dias
+        dias_intervalo = (vd2 - vd1).days
+        if dias_intervalo >= 30: return "🟢 Ok"
+        else: return "🔴 Gap <30d"
+
+    df['[Status] VD ACS (12m)'] = df.apply(checar_vds_diabetes, axis=1)
+    
+    df['Busca Ativa'] = df.apply(lambda r: gerar_link_wpp_custom(r.get('Telefone celular', ''), f"Olá {r['Nome']}! A equipe de saúde revisou seu prontuário e identificamos consultas ou exames de rotina pendentes no seu acompanhamento clínico. Podemos agendar?"), axis=1)
+    
     cols_status = [c for c in df.columns if '[Status]' in c]
     cols_view = ['Nome', 'Idade']
     if 'Microárea' in df.columns: cols_view.append('Microárea')
+    if 'Estratificação de risco cardiovascular' in df.columns: cols_view.append('Estratificação de risco cardiovascular')
     st.session_state['dados_diab'] = df[cols_view + cols_status + ['Busca Ativa']].copy()
 
 # PROCESSAMENTO: HIPERTENSÃO (NOTA C5)
@@ -575,11 +655,11 @@ with tabs[0]:
         'diab': {
             'titulo': "🩸 C4: Pessoa com Diabetes",
             'metricas': [
-                ('[Status] Consulta (6m)', 'Consulta Semestral', 20, 'Pelo menos 01 consulta nos últimos 6 meses.'),
-                ('[Status] PA (6m)', 'Aferição de PA (6m)', 15, 'Pelo menos 01 aferição de PA nos últimos 6 meses.'),
-                ('[Status] Peso/Altura (12m)', 'Peso e Altura (12m)', 15, 'Pelo menos 01 registro de peso e altura em 12 meses.'),
-                ('[Status] VD ACS (12m)', 'Visitas ACS (≥2 em 12m)', 20, 'Pelo menos 02 VD com intervalo mínimo de 30 dias.'),
-                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada', 15, '1 exame de HbA1c nos últimos 12 meses.'),
+                ('[Status] Consulta (6m)', 'Consulta Semestral', 20, '1 consulta (médico/enfermeiro) nos últimos 6 meses.'),
+                ('[Status] PA (6m)', 'Aferição de PA (6m)', 15, '1 aferição de PA nos últimos 6 meses.'),
+                ('[Status] Peso/Altura (12m)', 'Peso e Altura (12m)', 15, '1 registro simultâneo de peso e altura em 12 meses.'),
+                ('[Status] VD ACS (12m)', 'Visitas ACS (≥2 em 12m)', 20, '2 VD do ACS com intervalo mínimo de 30 dias.'),
+                ('[Status] HbA1c (12m)', 'Hemoglobina Glicada', 15, '1 HbA1c (solicitada ou avaliada) nos últimos 12 meses.'),
                 ('[Status] Pé Diabético (12m)', 'Avaliação dos Pés', 15, '1 avaliação dos pés nos últimos 12 meses.')
             ]
         },
